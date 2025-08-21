@@ -314,12 +314,13 @@ with gr.Blocks(css=css, title="Application Portfolio", theme=gr.themes.Soft()) a
                 
                 gr.HTML('<div class="apps-grid">')
                 with gr.Row():
-                    app1_btn = gr.Button("📱 PDF Data Extraction", elem_classes=["app-button"])
-                    app2_btn = gr.Button("🔧 App 2", elem_classes=["app-button"])
-                    app3_btn = gr.Button("📊 App 3", elem_classes=["app-button"])
+                    pdf_extraction_btn = gr.Button("📱 PDF Data Extraction", elem_classes=["app-button"])
+                    app2_btn = gr.Button("🔧 Chat with files", elem_classes=["app-button"])
+                    app3_btn = gr.Button("📊 Chat with Database", elem_classes=["app-button"])
                 with gr.Row():
-                    app4_btn = gr.Button("🎨 App 4", elem_classes=["app-button"])
-                    app5_btn = gr.Button("🌟 App 5", elem_classes=["app-button"])
+                    app4_btn = gr.Button("🎨 Speech to Text", elem_classes=["app-button"])
+                    app5_btn = gr.Button("🌟 Text to Speech", elem_classes=["app-button"])
+                    app6_btn = gr.Button("🌟 Image to Text", elem_classes=["app-button"])
                 gr.HTML('</div>')
                 gr.HTML('</div>')
     
@@ -339,33 +340,45 @@ with gr.Blocks(css=css, title="Application Portfolio", theme=gr.themes.Soft()) a
         inputs=[email_input],
         outputs=[login_page, home_page, app_pages, welcome_msg]
     )
+
+    # Add submit event for Enter key press on email input
+    email_input.submit(
+        handle_email_submit,
+        inputs=[email_input],
+        outputs=[login_page, home_page, app_pages, welcome_msg]
+    )
     
     # App button events
-    app1_btn.click(
+    pdf_extraction_btn.click(
         lambda: show_app("PDF Data Extraction"),
         outputs=[login_page, home_page, app_pages, app_title, app_description]
     )
     
     app2_btn.click(
-        lambda: show_app("App 2"),
+        lambda: show_app("Chat With Files"),
         outputs=[login_page, home_page, app_pages, app_title, app_description]
     )
     
     app3_btn.click(
-        lambda: show_app("App 3"),
+        lambda: show_app("Chat with Database"),
         outputs=[login_page, home_page, app_pages, app_title, app_description]
     )
     
     app4_btn.click(
-        lambda: show_app("App 4"),
+        lambda: show_app("Speech to Text"),
         outputs=[login_page, home_page, app_pages, app_title, app_description]
     )
     
     app5_btn.click(
-        lambda: show_app("App 5"),
+        lambda: show_app("Text to Speech"),
         outputs=[login_page, home_page, app_pages, app_title, app_description]
     )
-    
+
+    app6_btn.click(
+        lambda: show_app("Image to Text"),
+        outputs=[login_page, home_page, app_pages, app_title, app_description]
+    )
+
     back_btn.click(
         go_home,
         outputs=[login_page, app_pages, home_page]
