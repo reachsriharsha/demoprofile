@@ -1,8 +1,52 @@
 import gradio as gr
+import os
+import shutil
+import time
+from pathlib import Path
 
 # Global variables to store state
 user_email = ""
 current_page = "login"
+
+# Ensure uploads directory exists
+UPLOAD_DIR = "./uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+def handle_pdf_upload(file):
+    """Handle PDF file upload with validation"""
+    if file is None:
+        return "Please select a PDF file to upload.", ""
+    
+    # Check file extension
+    if not file.name.lower().endswith('.pdf'):
+        return "Please upload only PDF files.", ""
+    
+    # Check file size (20MB limit)
+    file_size = os.path.getsize(file.name)
+    max_size = 20 * 1024 * 1024  # 20MB in bytes
+    
+    if file_size > max_size:
+        return f"File size ({file_size / (1024*1024):.1f} MB) exceeds the 20MB limit.", ""
+    
+    try:
+        # Create unique filename to avoid conflicts
+        original_name = Path(file.name).name
+        timestamp = str(int(time.time()))
+        unique_filename = f"{timestamp}_{original_name}"
+        destination_path = os.path.join(UPLOAD_DIR, unique_filename)
+        
+        # Copy the uploaded file to uploads directory
+        shutil.copy2(file.name, destination_path)
+        
+        success_message = f"✅ Successfully uploaded: {original_name}\n"
+        success_message += f"📁 Saved as: {unique_filename}\n"
+        success_message += f"📊 File size: {file_size / (1024*1024):.2f} MB\n"
+        success_message += f"🗂️ Location: {destination_path}"
+        
+        return success_message, destination_path
+    
+    except Exception as e:
+        return f"❌ Error uploading file: {str(e)}", ""
 
 def handle_email_submit(email):
     """Handle email submission and show home page"""
@@ -28,13 +72,25 @@ def show_app(app_name):
     """Show specific app page"""
     global current_page
     current_page = f"app_{app_name.lower()}"
-    return (
-        gr.update(visible=False),  # Hide login page
-        gr.update(visible=False),  # Hide home page
-        gr.update(visible=True),   # Show app page
-        f"Welcome to {app_name}",
-        f"This is the {app_name} application page. Here you can add specific functionality for {app_name}."
-    )
+    
+    if app_name == "PDF Data Extraction":
+        return (
+            gr.update(visible=False),  # Hide login page
+            gr.update(visible=False),  # Hide home page
+            gr.update(visible=False),  # Hide generic app page
+            gr.update(visible=True),   # Show PDF extraction page
+            f"Welcome to {app_name}",
+            f"This is the {app_name} application page. Here you can add specific functionality for {app_name}."
+        )
+    else:
+        return (
+            gr.update(visible=False),  # Hide login page
+            gr.update(visible=False),  # Hide home page
+            gr.update(visible=True),   # Show generic app page
+            gr.update(visible=False),  # Hide PDF extraction page
+            f"Welcome to {app_name}",
+            f"This is the {app_name} application page. Here you can add specific functionality for {app_name}."
+        )
 
 def go_home():
     """Return to home page"""
@@ -43,6 +99,7 @@ def go_home():
     return (
         gr.update(visible=False),  # Hide login page
         gr.update(visible=False),  # Hide app pages
+        gr.update(visible=False),  # Hide PDF extraction page
         gr.update(visible=True),   # Show home page
     )
 
@@ -255,6 +312,31 @@ css = """
     background: var(--accent-hover) !important;
     transform: translateY(-1px);
 }
+
+/* File upload styling */
+.gradio-file {
+    border: 2px dashed var(--border) !important;
+    border-radius: 12px !important;
+    padding: 2rem !important;
+    text-align: center !important;
+    background: var(--bg-tertiary) !important;
+    transition: all 0.3s ease !important;
+}
+
+.gradio-file:hover {
+    border-color: var(--accent) !important;
+    background: var(--bg-secondary) !important;
+}
+
+/* Upload status styling */
+.upload-status {
+    background: var(--bg-tertiary) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 8px !important;
+    padding: 1rem !important;
+    font-family: monospace !important;
+    white-space: pre-wrap !important;
+}
 """
 
 # Create the Gradio interface
@@ -334,6 +416,37 @@ with gr.Blocks(css=css, title="Application Portfolio", theme=gr.themes.Soft()) a
                 app_description = gr.HTML('<p class="app-description">App description goes here.</p>')
                 gr.HTML('</div>')
     
+    # PDF Data Extraction Page
+    with gr.Column(visible=False) as pdf_extraction_page:
+        with gr.Row():
+            with gr.Column():
+                gr.HTML('<div class="app-page-container">')
+                pdf_back_btn = gr.Button("← Back to Home", elem_classes=["back-button"])
+                gr.HTML('<h2 class="app-title">📱 PDF Data Extraction</h2>')
+                gr.HTML('<p class="app-description">Upload your PDF files (up to 20MB) for data extraction and processing.</p>')
+                
+                # File upload section
+                with gr.Row():
+                    with gr.Column():
+                        pdf_file = gr.File(
+                            label="Select PDF File",
+                            file_types=[".pdf"],
+                            file_count="single"
+                        )
+                        upload_btn = gr.Button("📤 Upload PDF", elem_classes=["gradio-button"], variant="primary")
+                        
+                        # Upload status and info
+                        upload_status = gr.Textbox(
+                            label="Upload Status",
+                            lines=4,
+                            interactive=False,
+                            visible=True,
+                            elem_classes=["upload-status"]
+                        )
+                        uploaded_file_path = gr.Textbox(visible=False)  # Hidden field to store file path
+                
+                gr.HTML('</div>')
+    
     # Event handlers
     email_submit_btn.click(
         handle_email_submit,
@@ -351,37 +464,50 @@ with gr.Blocks(css=css, title="Application Portfolio", theme=gr.themes.Soft()) a
     # App button events
     pdf_extraction_btn.click(
         lambda: show_app("PDF Data Extraction"),
-        outputs=[login_page, home_page, app_pages, app_title, app_description]
+        outputs=[login_page, home_page, app_pages, pdf_extraction_page, app_title, app_description]
     )
     
     app2_btn.click(
         lambda: show_app("Chat With Files"),
-        outputs=[login_page, home_page, app_pages, app_title, app_description]
+        outputs=[login_page, home_page, app_pages, pdf_extraction_page, app_title, app_description]
     )
     
     app3_btn.click(
         lambda: show_app("Chat with Database"),
-        outputs=[login_page, home_page, app_pages, app_title, app_description]
+        outputs=[login_page, home_page, app_pages, pdf_extraction_page, app_title, app_description]
     )
     
     app4_btn.click(
         lambda: show_app("Speech to Text"),
-        outputs=[login_page, home_page, app_pages, app_title, app_description]
+        outputs=[login_page, home_page, app_pages, pdf_extraction_page, app_title, app_description]
     )
     
     app5_btn.click(
         lambda: show_app("Text to Speech"),
-        outputs=[login_page, home_page, app_pages, app_title, app_description]
+        outputs=[login_page, home_page, app_pages, pdf_extraction_page, app_title, app_description]
     )
 
     app6_btn.click(
         lambda: show_app("Image to Text"),
-        outputs=[login_page, home_page, app_pages, app_title, app_description]
+        outputs=[login_page, home_page, app_pages, pdf_extraction_page, app_title, app_description]
     )
 
     back_btn.click(
         go_home,
-        outputs=[login_page, app_pages, home_page]
+        outputs=[login_page, app_pages, pdf_extraction_page, home_page]
+    )
+    
+    # PDF extraction page back button
+    pdf_back_btn.click(
+        go_home,
+        outputs=[login_page, app_pages, pdf_extraction_page, home_page]
+    )
+    
+    # PDF upload functionality
+    upload_btn.click(
+        handle_pdf_upload,
+        inputs=[pdf_file],
+        outputs=[upload_status, uploaded_file_path]
     )
     
     # JavaScript for theme toggle
