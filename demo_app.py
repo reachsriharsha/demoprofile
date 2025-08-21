@@ -3,6 +3,11 @@ import os
 import shutil
 import time
 from pathlib import Path
+from markitdown import MarkItDown
+import pandas as pd
+import io
+import re
+
 
 # Global variables to store state
 user_email = ""
@@ -11,6 +16,132 @@ current_page = "login"
 # Ensure uploads directory exists
 UPLOAD_DIR = "./uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+
+def markdown_tables_to_dataframes(markdown_text):
+    """
+    Extract all tables from markdown and convert directly to pandas DataFrames.
+    Returns a list of DataFrames.
+    """
+    # Find all markdown tables using regex
+    table_pattern = r'(\|.*\|.*\n\|[-:\s\|]*\|.*\n(?:\|.*\|.*\n)*)'
+    tables = re.findall(table_pattern, markdown_text, re.MULTILINE)
+    
+    dataframes = []
+    
+    for table_text in tables:
+        df = markdown_table_to_dataframe(table_text.strip())
+        if df is not None:
+            dataframes.append(df)
+    
+    return dataframes
+
+def markdown_table_to_dataframe(table_string):
+    """
+    Convert a single markdown table to a pandas DataFrame.
+    """
+    lines = table_string.strip().split('\n')
+    
+    if len(lines) < 2:
+        return None
+    
+    # Parse header row
+    header_line = lines[0]
+    headers = [cell.strip() for cell in header_line.split('|')[1:-1]]  # Remove empty first/last
+    
+    # Skip separator row (line 1)
+    data_lines = lines[2:] if len(lines) > 2 else []
+    
+    # Parse data rows
+    data = []
+    for line in data_lines:
+        row = [cell.strip() for cell in line.split('|')[1:-1]]  # Remove empty first/last
+        data.append(row)
+    
+    if not data:
+        return None
+    
+    # Create DataFrame
+    try:
+        df = pd.DataFrame(data, columns=headers)
+        return df
+    except Exception as e:
+        print(f"Error creating DataFrame: {e}")
+        return None
+
+def save_tables_to_csv(markdown_text, output_prefix="table"):
+    """
+    Extract tables from markdown and save each as a separate CSV file.
+    """
+    dataframes = markdown_tables_to_dataframes(markdown_text)
+    
+    saved_files = []
+    for i, df in enumerate(dataframes):
+        filename = f"{output_prefix}_{i+1}.csv"
+        df.to_csv(filename, index=False)
+        saved_files.append(filename)
+        print(f"Saved Table {i+1} to {filename}")
+        print(f"Shape: {df.shape}")
+        print(df.head())
+        print("-" * 40)
+    
+    return saved_files
+
+def analyze_table_data(dataframes):
+    """
+    Perform basic analysis on extracted tables.
+    """
+    for i, df in enumerate(dataframes):
+        print(f"\n=== Analysis for Table {i+1} ===")
+        print(f"Shape: {df.shape}")
+        print(f"Columns: {list(df.columns)}")
+        print(f"Data types:")
+        print(df.dtypes)
+        print(f"\nFirst few rows:")
+        print(df.head())
+        print(f"\nBasic statistics (for numeric columns):")
+        try:
+            # Try to convert to numeric where possible
+            df_numeric = df.apply(pd.to_numeric, errors='ignore')
+            print(df_numeric.describe())
+        except:
+            print("No numeric data found")
+        print("-" * 50)
+
+# Complete example workflow
+def complete_table_extraction_workflow(file_path):
+    """
+    Complete workflow: Convert file -> Extract tables -> Analyze -> Save
+    """
+    print(f"Processing file: {file_path}")
+    
+    # Step 1: Convert to markdown
+    md = MarkItDown()
+    result = md.convert(file_path)
+    markdown_content = result.text_content
+    
+    print(f"Converted to markdown ({len(markdown_content)} characters)")
+    
+    # Step 2: Extract tables
+    dataframes = markdown_tables_to_dataframes(markdown_content)
+    print(f"Found {len(dataframes)} tables")
+    
+    if not dataframes:
+        print("No tables found in the document")
+        return
+    
+    # Step 3: Analyze tables
+    analyze_table_data(dataframes)
+    
+    # Step 4: Save to CSV files
+    saved_files = save_tables_to_csv(markdown_content, f"extracted_table_from_{file_path.replace('.', '_')}")
+    
+    print(f"\nWorkflow complete! Saved {len(saved_files)} CSV files:")
+    for file in saved_files:
+        print(f"  - {file}")
+    
+    return dataframes, saved_files
+
 
 def handle_pdf_upload(file):
     """Handle PDF file upload with validation"""
@@ -42,8 +173,26 @@ def handle_pdf_upload(file):
         success_message += f"📁 Saved as: {unique_filename}\n"
         success_message += f"📊 File size: {file_size / (1024*1024):.2f} MB\n"
         success_message += f"🗂️ Location: {destination_path}"
+
         
-        return success_message, destination_path
+        md = MarkItDown(enable_plugins=False) # Set to True to enable plugins
+        result = md.convert(destination_path)
+        #print(result.text_content)
+        
+        print("Example with sample markdown:")
+        dataframes = markdown_tables_to_dataframes(result.text_content)
+        table_outputs = ""
+        for i, df in enumerate(dataframes):
+            print(f"\nTable {i+1}:")
+            print(df)
+            print(f"Shape: {df.shape}")
+            # Add table and shape to output string for Gradio
+            table_html = df.to_html(index=False)
+            table_outputs += f"<h4>Table {i+1} (Shape: {df.shape})</h4>" + table_html + "<br>"
+
+        # Combine status and table outputs for Gradio
+        combined_output = success_message + "<br>" + table_outputs if table_outputs else success_message
+        return combined_output, destination_path
     
     except Exception as e:
         return f"❌ Error uploading file: {str(e)}", ""
