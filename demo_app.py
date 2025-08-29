@@ -9,6 +9,21 @@ from pdfminer.high_level import extract_text_to_fp
 from pdfminer.layout import LAParams
 import logging
 import traceback
+from datetime import datetime
+from pydub import AudioSegment
+from dotenv import load_dotenv
+
+# Load environment variables from a .env file
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('gradio_app.log'),
+        logging.StreamHandler()  # Also log to console
+    ]
+)
 
 # --- State Management ---
 # Using a dictionary for a more structured state
@@ -187,6 +202,75 @@ def handle_pdf_upload(pdf_file, progress=gr.Progress(track_tqdm=True)):
             gr.update(value="", visible=False),
             gr.update(selected=0)
         )
+
+def handle_recording(audio_path):
+    """Saves the recorded audio to a file and makes it available for playback and conversion."""
+    if not audio_path:
+        return (gr.update(), gr.update(), gr.update(), None)
+
+    upload_dir = "./uploads"
+    os.makedirs(upload_dir, exist_ok=True)
+
+    try:
+        # Convert recorded WAV from Gradio to MP3 and save with a unique name
+        audio = AudioSegment.from_wav(audio_path)
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        random_prefix = uuid.uuid4().hex[:8]
+        new_filename = f"{random_prefix}_{timestamp}.mp3"
+        destination_path = os.path.join(upload_dir, new_filename)
+        audio.export(destination_path, format="mp3")
+        logging.info(f"Saved recorded audio to {destination_path}")
+
+        # Return updates to show the saved audio and the convert button
+        return (
+            gr.update(value=destination_path, visible=True), # audio player
+            gr.update(visible=True), # convert button
+            gr.update(value="", visible=False), # clear and hide text output
+            destination_path # update state
+        )
+    except Exception as e:
+        logging.error(f"Error processing audio: {e}")
+        traceback.print_exc()
+        gr.Warning(f"Failed to process audio: {e}")
+        return (gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), None)
+
+def convert_audio_to_text(audio_path, progress=gr.Progress(track_tqdm=True)):
+    """Converts the saved audio file to text using SarvamAI."""
+    if not audio_path:
+        gr.Warning("No audio file to process. Please record audio first.")
+        return gr.update(visible=False)
+
+    api_key = os.environ.get("SARVAMAI_API_KEY")
+    if not api_key:
+        error_msg = "SarvamAI API key not set. Please configure the SARVAMAI_API_KEY environment variable."
+        logging.error(error_msg)
+        gr.Error(error_msg)
+        return gr.update(visible=False)
+
+    progress(0, desc="Starting conversion...")
+    try:
+        from sarvamai import SarvamAI
+
+        client = SarvamAI(api_subscription_key=api_key)
+        with open(audio_path, "rb") as audio_file:
+            stime = datetime.now()
+            response = client.speech_to_text.transcribe(
+                                            file=audio_file,
+                                            model="saarika:v2.5",
+                                            language_code="en-IN"
+                        )
+
+        etime = datetime.now()
+        elapsed_time = (etime - stime).total_seconds()
+        logging.info(f"✅ Transcription Response: {response}. {elapsed_time:.2f} seconds")
+        return gr.update(value=response.transcript, visible=True)
+    except Exception as e:
+        error_msg = f"Failed to convert audio to text: {e}"
+        logging.error(error_msg)
+        traceback.print_exc()
+        gr.Warning(error_msg)
+        return gr.update(value="Transcription failed. Please check logs for details.", visible=True)
+
 
 # --- UI Definition ---
 
@@ -388,6 +472,27 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
                     with gr.TabItem("Emails & Phone Numbers", id=3):
                         contacts_output = gr.Markdown("No contact information extracted yet.")
 
+    # --- Voice to Text Page ---
+    with gr.Column(visible=False) as voice_to_text_page:
+        with gr.Row():
+            with gr.Column(elem_classes=["page-container"]):
+                v2t_back_button = gr.Button("← Back to Home", elem_classes=["back-button"])
+                gr.HTML('<h2 class="page-title">🎤 Voice to Text</h2>')
+                gr.HTML("<p class='welcome-text'>Record your voice (max 10 seconds) and convert it to text.</p>")
+
+                v2t_audio_input = gr.Audio(
+                    sources=["microphone"],
+                    type="filepath",
+                    label="Record Audio",
+                    max_length=10,
+                )
+
+                v2t_audio_output = gr.Audio(label="Your Recording", type="filepath", visible=False)
+                v2t_convert_button = gr.Button("Convert to Text", variant="primary", visible=False)
+                v2t_text_output = gr.Textbox(label="Transcription", lines=5, visible=False, show_copy_button=True)
+
+                v2t_audio_path_state = gr.State()
+
     # --- Event Wiring ---
 
     # Login action
@@ -411,6 +516,13 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
                 inputs=[],
                 outputs=[home_page, pdf_extraction_page]
             )
+        elif name == "Voice to Text":
+            # Special navigation for Voice to Text page
+            button.click(
+                fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
+                inputs=[],
+                outputs=[home_page, voice_to_text_page]
+            )
         else:
             # Generic navigation for other apps
             button.click(
@@ -433,6 +545,13 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
         outputs=[pdf_extraction_page, home_page]
     )
 
+    # Back button action from Voice to Text page
+    v2t_back_button.click(
+        fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
+        inputs=[],
+        outputs=[voice_to_text_page, home_page]
+    )
+
     # PDF Upload action
     pdf_upload_input.upload(
         fn=handle_pdf_upload,
@@ -440,6 +559,25 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
         outputs=[upload_status_output, tables_output, images_output, contacts_output, results_tabs]
     )
 
+    # Voice to Text actions
+    v2t_audio_input.stop_recording(
+        fn=handle_recording,
+        inputs=[v2t_audio_input],
+        outputs=[v2t_audio_output, v2t_convert_button, v2t_text_output, v2t_audio_path_state]
+    )
+
+    v2t_convert_button.click(
+        fn=convert_audio_to_text,
+        inputs=[v2t_audio_path_state],
+        outputs=[v2t_text_output]
+    )
+
 # --- App Launch ---
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", share=False, debug=True)
+    demo.launch(server_name="0.0.0.0", 
+                share=False, 
+                debug=True,
+                ssl_certfile="certificates/server.crt",
+                ssl_keyfile="certificates/server.key",
+                ssl_verify=False  # Disable SSL verification for self-signed certs
+                )
