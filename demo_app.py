@@ -1,9 +1,14 @@
 import gradio as gr
 import os
 import shutil
-
 import uuid
 import camelot
+import re
+import io
+from pdfminer.high_level import extract_text_to_fp
+from pdfminer.layout import LAParams
+import logging
+import traceback
 
 # --- State Management ---
 # Using a dictionary for a more structured state
@@ -53,47 +58,135 @@ def go_home():
         gr.update(visible=True)   # home_page
     )
 
-def handle_pdf_upload(pdf_file):
-    """Handle PDF file upload, save it, and extract tables using Camelot."""
+def handle_pdf_upload(pdf_file, progress=gr.Progress(track_tqdm=True)):
+    """Handle PDF file upload, save it, and extract content with progress."""
+    progress(0, desc="Starting PDF processing...")
     if not pdf_file:
-        # Return an update for the output component to clear and hide it.
-        return "Please upload a PDF file first.", gr.update(value="", visible=False), gr.update(selected=0)
+        # Return an update for the output components to clear and hide them.
+        return (
+            "Please upload a PDF file first.",
+            gr.update(value="", visible=False),  # tables
+            gr.update(value=None, visible=False), # images
+            gr.update(value="", visible=False),   # contacts
+            gr.update(selected=0)                 # tabs
+        )
 
     upload_dir = "./uploads"
     os.makedirs(upload_dir, exist_ok=True)
 
     try:
-        # 1. Save the file
+        # 1. Save the uploaded file
+        progress(0.1, desc="Saving uploaded file...")
         original_filename = os.path.basename(pdf_file.name)
         random_prefix = uuid.uuid4().hex[:8]
         new_filename = f"{random_prefix}_{original_filename}"
         destination_path = os.path.join(upload_dir, new_filename)
         shutil.copy(pdf_file.name, destination_path)
 
-        # 2. Extract tables with Camelot
+        logging.info(f'File saving completed')
+        # 2. Extract text and images with pdfminer.six
+        progress(0.2, desc="Extracting text and images...")
+        image_output_dir = os.path.join(upload_dir, f"{random_prefix}_images")
+        os.makedirs(image_output_dir, exist_ok=True)
+        
+        text_output = io.BytesIO()
+        with open(destination_path, 'rb') as fp:
+            extract_text_to_fp(fp, text_output, output_dir=image_output_dir, laparams=LAParams())
+        
+        full_text = text_output.getvalue().decode(errors="ignore")
+        text_output.close()
+        logging.info(f'Text extraction completed')
+
+        image_files = [f for f in os.listdir(image_output_dir) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp'))]
+        extracted_images = [os.path.join(image_output_dir, f) for f in image_files]
+        num_images = len(extracted_images)
+
+
+        logging.info(f'Images extraction completed')
+        # 3. Extract tables with Camelot
+        progress(0.5, desc="Extracting tables (this may take a while)...")
         tables = camelot.read_pdf(destination_path, pages='all', flavor='stream')
 
-        if tables.n == 0:
-            final_status = f"✅ File **{original_filename}** uploaded successfully.\n\nℹ️ No tables found in the document."
-            return final_status, gr.update(value="", visible=False), gr.update(selected=0)
+        logging.info(f'Tables extraction completed')
+        # 4. Extract Emails and Phone Numbers from the text
+        progress(0.8, desc="Extracting contact information...")
+        email_regex = r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"
+        found_emails = sorted(list(set(re.findall(email_regex, full_text))))
+        num_emails = len(found_emails)
 
-        # 3. Prepare HTML output to display tables
-        table_html_parts = []
-        for i, table in enumerate(tables):
-            table_header = f"<h3>Table {i+1} (from Page {table.page})</h3>"
-            # Convert dataframe to a nicely styled HTML table
-            table_dataframe_html = table.df.to_html(classes="gradio-dataframe", border=0)
-            table_html_parts.append(table_header)
-            table_html_parts.append(table_dataframe_html)
+        phone_regex = r"(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}"
+        found_phones = sorted(list(set(re.findall(phone_regex, full_text))))
+        num_phones = len(found_phones)
+        # 5. Prepare status message
+        logging.info(f'Email and phone extraction completed')
 
-        full_html_output = "".join(table_html_parts)
-        final_status = f"✅ File **{original_filename}** uploaded successfully.\n\nFound **{tables.n}** tables. See them in the 'Extracted Tables' tab."
+        progress(0.9, desc="Finalizing results...")
+        status_parts = [f"✅ File **{original_filename}** uploaded successfully.\n"]
+        if tables.n > 0:
+            status_parts.append(f"\n- Found **{tables.n}** tables.")
+        else:
+            status_parts.append(f"\n- ℹ️ No tables found.")
 
-        return final_status, gr.update(value=full_html_output, visible=True), gr.update(selected=1)
+        if num_images > 0:
+            status_parts.append(f"\n- Found **{num_images}** images.")
+        else:
+            status_parts.append(f"\n- ℹ️ No images found.")
 
+        if num_emails > 0:
+            status_parts.append(f"\n- Found **{num_emails}** email(s).")
+
+        if num_phones > 0:
+            status_parts.append(f"\n- Found **{num_phones}** phone number(s).")
+
+        if tables.n > 0 or num_images > 0 or num_emails > 0 or num_phones > 0:
+            status_parts.append("\n\nCheck the other tabs for extracted content.")
+        final_status = "".join(status_parts)
+
+        # 6. Prepare HTML output for tables
+        if tables.n > 0:
+            table_html_parts = []
+            for i, table in enumerate(tables):
+                table_header = f"<h3>Table {i+1} (from Page {table.page})</h3>"
+                table_dataframe_html = table.df.to_html(classes="gradio-dataframe", border=0)
+                table_html_parts.append(table_header)
+                table_html_parts.append(table_dataframe_html)
+            full_html_output = "".join(table_html_parts)
+            tables_update = gr.update(value=full_html_output, visible=True)
+        else:
+            tables_update = gr.update(value="", visible=False)
+
+        # 7. Prepare images for gallery
+        images_update = gr.update(value=extracted_images if num_images > 0 else None, visible=num_images > 0)
+
+        # 8. Prepare markdown for contacts
+        contacts_md_parts = []
+        if num_emails > 0:
+            contacts_md_parts.append("### Emails Found\n" + "\n".join(f"- `{email}`" for email in found_emails))
+        if num_phones > 0:
+            if contacts_md_parts:
+                contacts_md_parts.append("\n---\n")
+            contacts_md_parts.append("### Phone Numbers Found\n" + "\n".join(f"- `{phone}`" for phone in found_phones))
+        
+        if not contacts_md_parts:
+            contacts_output_str = "ℹ️ No emails or phone numbers found in the document."
+        else:
+            contacts_output_str = "\n".join(contacts_md_parts)
+        contacts_update = gr.update(value=contacts_output_str, visible=True)
+
+        # 9. Return all updates
+        # Keep focus on the summary tab after processing.
+        return final_status, tables_update, images_update, contacts_update, gr.update(selected=0)
     except Exception as e:
-        error_message = f"❌ An error occurred during table extraction: {str(e)}"
-        return error_message, gr.update(value="", visible=False), gr.update(selected=0)
+        logging.error(f'An error occurred during processing, try other files: {str(e)}')
+        traceback.print_exc()
+        error_message = f"❌ An error occurred during processing, try other files"
+        return (
+            error_message,
+            gr.update(value="", visible=False),
+            gr.update(value=None, visible=False),
+            gr.update(value="", visible=False),
+            gr.update(selected=0)
+        )
 
 # --- UI Definition ---
 
@@ -286,10 +379,14 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
                 pdf_upload_input = gr.File(label="Upload PDF", file_types=[".pdf"])
                 
                 with gr.Tabs() as results_tabs:
-                    with gr.TabItem("Upload Status", id=0):
-                        upload_status_output = gr.Markdown("Upload a file to see its status here.")
+                    with gr.TabItem("Upload Summary", id=0):
+                        upload_status_output = gr.Markdown("Upload a file to see its summary here.")
                     with gr.TabItem("Extracted Tables", id=1):
                         tables_output = gr.HTML()
+                    with gr.TabItem("Extracted Images", id=2):
+                        images_output = gr.Gallery(label="Extracted Images", show_label=False, elem_id="gallery", columns=4, object_fit="contain")
+                    with gr.TabItem("Emails & Phone Numbers", id=3):
+                        contacts_output = gr.Markdown("No contact information extracted yet.")
 
     # --- Event Wiring ---
 
@@ -340,7 +437,7 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
     pdf_upload_input.upload(
         fn=handle_pdf_upload,
         inputs=[pdf_upload_input],
-        outputs=[upload_status_output, tables_output, results_tabs]
+        outputs=[upload_status_output, tables_output, images_output, contacts_output, results_tabs]
     )
 
 # --- App Launch ---
