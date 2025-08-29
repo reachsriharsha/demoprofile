@@ -1,4 +1,9 @@
 import gradio as gr
+import os
+import shutil
+
+import uuid
+import camelot
 
 # --- State Management ---
 # Using a dictionary for a more structured state
@@ -48,18 +53,61 @@ def go_home():
         gr.update(visible=True)   # home_page
     )
 
+def handle_pdf_upload(pdf_file):
+    """Handle PDF file upload, save it, and extract tables using Camelot."""
+    if not pdf_file:
+        # Return an update for the output component to clear and hide it.
+        return "Please upload a PDF file first.", gr.update(value="", visible=False), gr.update(selected=0)
+
+    upload_dir = "./uploads"
+    os.makedirs(upload_dir, exist_ok=True)
+
+    try:
+        # 1. Save the file
+        original_filename = os.path.basename(pdf_file.name)
+        random_prefix = uuid.uuid4().hex[:8]
+        new_filename = f"{random_prefix}_{original_filename}"
+        destination_path = os.path.join(upload_dir, new_filename)
+        shutil.copy(pdf_file.name, destination_path)
+
+        # 2. Extract tables with Camelot
+        tables = camelot.read_pdf(destination_path, pages='all', flavor='stream')
+
+        if tables.n == 0:
+            final_status = f"✅ File **{original_filename}** uploaded successfully.\n\nℹ️ No tables found in the document."
+            return final_status, gr.update(value="", visible=False), gr.update(selected=0)
+
+        # 3. Prepare HTML output to display tables
+        table_html_parts = []
+        for i, table in enumerate(tables):
+            table_header = f"<h3>Table {i+1} (from Page {table.page})</h3>"
+            # Convert dataframe to a nicely styled HTML table
+            table_dataframe_html = table.df.to_html(classes="gradio-dataframe", border=0)
+            table_html_parts.append(table_header)
+            table_html_parts.append(table_dataframe_html)
+
+        full_html_output = "".join(table_html_parts)
+        final_status = f"✅ File **{original_filename}** uploaded successfully.\n\nFound **{tables.n}** tables. See them in the 'Extracted Tables' tab."
+
+        return final_status, gr.update(value=full_html_output, visible=True), gr.update(selected=1)
+
+    except Exception as e:
+        error_message = f"❌ An error occurred during table extraction: {str(e)}"
+        return error_message, gr.update(value="", visible=False), gr.update(selected=0)
+
 # --- UI Definition ---
 
 # Custom CSS for a modern and clean look
 css = """
 :root {
-    --bg-primary: #f9fafb;
-    --bg-secondary: #ffffff;
-    --text-primary: #111827;
-    --text-secondary: #6b7280;
-    --accent: #3b82f6;
-    --accent-hover: #2563eb;
-    --border: #e5e7eb;
+    /* Dark Theme Palette */
+    --bg-primary: #111827;      /* Darkest Gray */
+    --bg-secondary: #1f2937;     /* Dark Gray */
+    --text-primary: #f9fafb;     /* Off-White */
+    --text-secondary: #9ca3af;   /* Gray */
+    --accent: #3b82f6;           /* Blue */
+    --accent-hover: #2563eb;     /* Darker Blue */
+    --border: #374151;           /* Lighter Dark Gray for borders */
     --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
     --gradient: linear-gradient(135deg, #60a5fa 0%, #3b82f6 100%);
 }
@@ -150,6 +198,26 @@ css = """
     background: var(--accent-hover) !important;
 }
 
+.gradio-dataframe {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 1rem;
+    margin-bottom: 1rem;
+    color: var(--text-primary) !important;
+}
+
+.gradio-dataframe th, .gradio-dataframe td {
+    border: 1px solid var(--border);
+    padding: 0.75rem;
+    text-align: left;
+    white-space: normal; /* Allow text to wrap */
+}
+
+.gradio-dataframe th {
+    background-color: var(--bg-primary);
+    font-weight: 600;
+}
+
 .gradio-textbox, .gradio-button {
     border-radius: 8px !important;
 }
@@ -207,6 +275,22 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
                 app_title = gr.HTML('<h2 class="page-title">App Name</h2>')
                 app_placeholder = gr.HTML("<p>App content goes here.</p>")
 
+    # --- PDF Extraction Page ---
+    with gr.Column(visible=False) as pdf_extraction_page:
+        with gr.Row():
+            with gr.Column(elem_classes=["page-container"]):
+                pdf_back_button = gr.Button("← Back to Home", elem_classes=["back-button"])
+                gr.HTML('<h2 class="page-title">📄 PDF Extraction</h2>')
+                gr.HTML("<p class='welcome-text'>Upload a PDF file. The system will save it and extract any tables found within.</p>")
+
+                pdf_upload_input = gr.File(label="Upload PDF", file_types=[".pdf"])
+                
+                with gr.Tabs() as results_tabs:
+                    with gr.TabItem("Upload Status", id=0):
+                        upload_status_output = gr.Markdown("Upload a file to see its status here.")
+                    with gr.TabItem("Extracted Tables", id=1):
+                        tables_output = gr.HTML()
+
     # --- Event Wiring ---
 
     # Login action
@@ -223,17 +307,40 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
 
     # App navigation actions
     for name, button in app_buttons.items():
-        button.click(
-            fn=lambda app_name=name: show_app_page(app_name),
-            inputs=[],
-            outputs=[home_page, app_page, app_title, app_placeholder]
-        )
+        if name == "PDF Extraction":
+            # Special navigation for PDF Extraction page
+            button.click(
+                fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
+                inputs=[],
+                outputs=[home_page, pdf_extraction_page]
+            )
+        else:
+            # Generic navigation for other apps
+            button.click(
+                fn=lambda app_name=name: show_app_page(app_name),
+                inputs=[],
+                outputs=[home_page, app_page, app_title, app_placeholder]
+            )
 
-    # Back button action
+    # Back button action from generic page
     back_button.click(
         fn=go_home,
         inputs=[],
         outputs=[app_page, home_page]
+    )
+
+    # Back button action from PDF page
+    pdf_back_button.click(
+        fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
+        inputs=[],
+        outputs=[pdf_extraction_page, home_page]
+    )
+
+    # PDF Upload action
+    pdf_upload_input.upload(
+        fn=handle_pdf_upload,
+        inputs=[pdf_upload_input],
+        outputs=[upload_status_output, tables_output, results_tabs]
     )
 
 # --- App Launch ---
