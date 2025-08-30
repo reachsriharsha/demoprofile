@@ -12,6 +12,7 @@ import traceback
 from datetime import datetime
 from pydub import AudioSegment
 from dotenv import load_dotenv
+import threading
 
 # Load environment variables from a .env file
 load_dotenv()
@@ -88,6 +89,8 @@ def handle_pdf_upload(pdf_file, progress=gr.Progress(track_tqdm=True)):
 
     upload_dir = "./uploads"
     os.makedirs(upload_dir, exist_ok=True)
+
+
 
     try:
         # 1. Save the uploaded file
@@ -271,6 +274,57 @@ def convert_audio_to_text(audio_path, progress=gr.Progress(track_tqdm=True)):
         gr.Warning(error_msg)
         return gr.update(value="Transcription failed. Please check logs for details.", visible=True)
 
+        # Schedule deletion of the file after returning it
+def delete_temp_file(path):
+    try:
+        os.remove(path)
+        logging.info(f"Deleted temporary file: {path}")
+    except Exception as e:
+        logging.error(f"Failed to delete temporary file {path}: {e}")
+
+def convert_text_to_speech(text, speaker, progress=gr.Progress(track_tqdm=True)):
+    """Converts the provided text to speech using SarvamAI."""
+    audios_dir = "./audios"
+    os.makedirs(audios_dir, exist_ok=True)
+    api_key = os.environ.get("SARVAMAI_API_KEY")
+    if not api_key: 
+        error_msg = "SarvamAI API key not set. Please configure the SARVAMAI_API_KEY environment variable."
+        logging.error(error_msg)
+        gr.Error(error_msg)
+        return gr.update(visible=False)
+    if not text.strip():
+        gr.Warning("Please enter some text to convert to speech.")
+        return gr.update(visible=False)
+    progress(0, desc="Starting text-to-speech conversion...")
+    try:
+        from sarvamai import SarvamAI
+        from sarvamai.play import save
+        client = SarvamAI(api_subscription_key=api_key)
+        stime = datetime.now()  
+        audio = client.text_to_speech.convert(
+            text="".join(text.split()[:50]),# Limit to first 50 characters 
+            speaker=speaker,
+            model="bulbul:v2",
+            target_language_code="en-IN"
+        )
+        # Save the audio to a temporary file
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        random_prefix = uuid.uuid4().hex[:8]
+        saved_audio_path = f"./audios/{random_prefix}_{timestamp}.wav"
+        save(audio, saved_audio_path)
+        etime = datetime.now()  
+        elapsed_time = (etime - stime).total_seconds()
+        logging.info(f"✅ Speech Response time  {elapsed_time:.2f} seconds")
+        logging.info(f"Generated synthesized speech at {saved_audio_path}")
+        # Schedule deletion of the file after returning it
+        threading.Timer(30, delete_temp_file, args=[saved_audio_path]).start()
+        return gr.update(value=saved_audio_path, visible=True)
+    except Exception as e:
+        error_msg = f"Failed to convert text to speech: {e}"
+        logging.error(error_msg)
+        traceback.print_exc()
+        gr.Warning(error_msg)
+        return gr.update(value="Speech synthesis failed. Please check logs for details.", visible=True) 
 
 # --- UI Definition ---
 
@@ -493,6 +547,29 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
 
                 v2t_audio_path_state = gr.State()
 
+    # --- Text to Speech Page ---
+    with gr.Column(visible=False) as text_to_voice_page:
+        with gr.Row():
+            with gr.Column(elem_classes=["page-container"]):
+                t2v_back_button = gr.Button("← Back to Home", elem_classes=["back-button"])
+                gr.HTML('<h2 class="page-title">🗣️ Text to Voice</h2>')
+                gr.HTML("<p class='welcome-text'>Please provide your text below to convert it to speech.</p>")
+                t2v_text_input = gr.Textbox(
+                    label="Enter Text to Convert", 
+                    lines=5, 
+                    placeholder="Type your text here... \n (Max 50 words)", 
+                    show_copy_button=True
+                    )
+                #list of voices from sarvamai
+                t2v_speaker_dropdown = gr.Dropdown(
+                    label="Select Speaker",
+                    choices=["anushka", "abhilash", "manisha", "vidya", "arya", "karun", "hitesh"],  # Example speakers
+                    value="anushka",
+                    interactive=True
+                )                   
+                t2v_convert_button = gr.Button("Convert to Speech", variant="primary")
+                t2v_audio_output = gr.Audio(label="Speech Output", type="filepath", visible=False)
+
     # --- Event Wiring ---
 
     # Login action
@@ -523,6 +600,13 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
                 inputs=[],
                 outputs=[home_page, voice_to_text_page]
             )
+        elif name == "Text to Voice":
+            # Special navigation for Text to Speech page
+            button.click(
+                fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
+                inputs=[],
+                outputs=[home_page, text_to_voice_page]
+            )
         else:
             # Generic navigation for other apps
             button.click(
@@ -552,6 +636,13 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
         outputs=[voice_to_text_page, home_page]
     )
 
+    # Back button action from Text to Speech page
+    t2v_back_button.click(
+        fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
+        inputs=[],
+        outputs=[text_to_voice_page, home_page]
+    )
+
     # PDF Upload action
     pdf_upload_input.upload(
         fn=handle_pdf_upload,
@@ -571,6 +662,14 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
         inputs=[v2t_audio_path_state],
         outputs=[v2t_text_output]
     )
+    
+    # Text to Speech actions
+    t2v_convert_button.click(
+        fn=convert_text_to_speech,
+        inputs=[t2v_text_input,t2v_speaker_dropdown],
+        outputs=[t2v_audio_output]
+    )
+
 
 # --- App Launch ---
 if __name__ == "__main__":
