@@ -282,7 +282,7 @@ def delete_temp_file(path):
     except Exception as e:
         logging.error(f"Failed to delete temporary file {path}: {e}")
 
-def convert_text_to_speech(text, progress=gr.Progress(track_tqdm=True)):
+def convert_text_to_speech(text, speaker, progress=gr.Progress(track_tqdm=True)):
     """Converts the provided text to speech using SarvamAI."""
     audios_dir = "./audios"
     os.makedirs(audios_dir, exist_ok=True)
@@ -303,7 +303,7 @@ def convert_text_to_speech(text, progress=gr.Progress(track_tqdm=True)):
         stime = datetime.now()  
         audio = client.text_to_speech.convert(
             text="".join(text.split()[:50]),# Limit to first 50 characters 
-            speaker="anushka",
+            speaker=speaker,
             model="bulbul:v2",
             target_language_code="en-IN"
         )
@@ -560,6 +560,13 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
                     placeholder="Type your text here... \n (Max 50 words)", 
                     show_copy_button=True
                     )
+                #list of voices from sarvamai
+                t2v_speaker_dropdown = gr.Dropdown(
+                    label="Select Speaker",
+                    choices=["anushka", "abhilash", "manisha", "vidya", "arya", "karun", "hitesh"],  # Example speakers
+                    value="anushka",
+                    interactive=True
+                )                   
                 t2v_convert_button = gr.Button("Convert to Speech", variant="primary")
                 t2v_audio_output = gr.Audio(label="Speech Output", type="filepath", visible=False)
 
@@ -659,7 +666,7 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
     # Text to Speech actions
     t2v_convert_button.click(
         fn=convert_text_to_speech,
-        inputs=[t2v_text_input],
+        inputs=[t2v_text_input,t2v_speaker_dropdown],
         outputs=[t2v_audio_output]
     )
 
