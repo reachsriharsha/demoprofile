@@ -375,6 +375,86 @@ class UserManager:
                 'message': 'Unexpected error occurred'
             }
     
+    def check_text_to_voice_quota(self, email: str, max_daily_usage: int = 5) -> dict:
+        """
+        Check if user has reached their daily text-to-voice quota.
+        Resets usage count if more than 24 hours have passed since last login.
+        
+        Args:
+            email (str): User's email address
+            max_daily_usage (int): Maximum allowed daily usage (default: 5)
+            
+        Returns:
+            dict: {
+                'can_use': bool,
+                'current_usage': int,
+                'max_usage': int,
+                'message': str
+            }
+        """
+        if not email or not email.strip():
+            return {
+                'can_use': False,
+                'current_usage': 0,
+                'max_usage': max_daily_usage,
+                'message': 'Invalid email provided'
+            }
+        
+        try:
+            with self._get_session() as session:
+                user = session.query(UserLogin).filter(UserLogin.email == email.strip().lower()).first()
+                
+                if not user:
+                    return {
+                        'can_use': False,
+                        'current_usage': 0,
+                        'max_usage': max_daily_usage,
+                        'message': 'User not found'
+                    }
+                
+                current_time = datetime.now()
+                time_diff = current_time - user.last_login_time
+                hours_since_login = time_diff.total_seconds() / 3600
+                
+                # If more than 24 hours have passed since last login, reset usage count
+                if hours_since_login > 24:
+                    user.text_to_voice_usage_count = 0
+                    session.commit()
+                    logging.info(f"Reset text-to-voice usage count for {email} (last login > 24h ago)")
+                
+                # Check if user has reached quota
+                if user.text_to_voice_usage_count >= max_daily_usage:
+                    return {
+                        'can_use': False,
+                        'current_usage': user.text_to_voice_usage_count,
+                        'max_usage': max_daily_usage,
+                        'message': f'Your quota of {max_daily_usage} tries reached. Try after 24 hours.'
+                    }
+                else:
+                    return {
+                        'can_use': True,
+                        'current_usage': user.text_to_voice_usage_count,
+                        'max_usage': max_daily_usage,
+                        'message': f'Usage: {user.text_to_voice_usage_count}/{max_daily_usage}'
+                    }
+                    
+        except SQLAlchemyError as e:
+            logging.error(f"Failed to check text-to-voice quota for {email}: {e}")
+            return {
+                'can_use': False,
+                'current_usage': 0,
+                'max_usage': max_daily_usage,
+                'message': 'Database error occurred'
+            }
+        except Exception as e:
+            logging.error(f"Unexpected error checking text-to-voice quota for {email}: {e}")
+            return {
+                'can_use': False,
+                'current_usage': 0,
+                'max_usage': max_daily_usage,
+                'message': 'Unexpected error occurred'
+            }
+    
     def close(self):
         """Close database connections."""
         if self.engine:

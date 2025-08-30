@@ -323,8 +323,16 @@ def delete_temp_file(path):
     except Exception as e:
         logging.error(f"Failed to delete temporary file {path}: {e}")
 
-def convert_text_to_speech(text, speaker, progress=gr.Progress(track_tqdm=True)):
+def convert_text_to_speech(text, speaker, session_state, progress=gr.Progress(track_tqdm=True)):
     """Converts the provided text to speech using SarvamAI."""
+    # Check user quota before proceeding
+    user_email = session_state.get("user_email", "") if session_state else ""
+    if user_email:
+        quota_check = user_manager.check_text_to_voice_quota(user_email)
+        if not quota_check['can_use']:
+            gr.Warning(quota_check['message'])
+            return gr.update(value="Speech synthesis quota exceeded. Please check logs for details.", visible=True)
+
     # Voice mapping from generic names to actual speaker names
     voice_mapping = {
         "voice1": "anushka",
@@ -371,6 +379,11 @@ def convert_text_to_speech(text, speaker, progress=gr.Progress(track_tqdm=True))
         elapsed_time = (etime - stime).total_seconds()
         logging.info(f"✅ Speech Response time  {elapsed_time:.2f} seconds")
         logging.info(f"Generated synthesized speech at {saved_audio_path}")
+        
+        # Increment usage count after successful synthesis
+        if user_email:
+            user_manager.increment_text_to_voice_usage(user_email)
+        
         # Schedule deletion of the file after returning it
         threading.Timer(300, delete_temp_file, args=[saved_audio_path]).start()
         return gr.update(value=saved_audio_path, visible=True)
@@ -724,7 +737,7 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
     # Text to Speech actions
     t2v_convert_button.click(
         fn=convert_text_to_speech,
-        inputs=[t2v_text_input,t2v_speaker_dropdown],
+        inputs=[t2v_text_input, t2v_speaker_dropdown, session_state],
         outputs=[t2v_audio_output]
     )
 
