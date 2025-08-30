@@ -234,7 +234,7 @@ def handle_recording(audio_path):
     except Exception as e:
         logging.error(f"Error processing audio: {e}")
         traceback.print_exc()
-        gr.Warning(f"Failed to process audio: {e}")
+        gr.Warning(f"Failed to process audio:")
         return (gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), None)
 
 def convert_audio_to_text(audio_path, progress=gr.Progress(track_tqdm=True)):
@@ -247,7 +247,7 @@ def convert_audio_to_text(audio_path, progress=gr.Progress(track_tqdm=True)):
     if not api_key:
         error_msg = "SarvamAI API key not set. Please configure the SARVAMAI_API_KEY environment variable."
         logging.error(error_msg)
-        gr.Error(error_msg)
+        #gr.Error(error_msg)
         return gr.update(visible=False)
 
     progress(0, desc="Starting conversion...")
@@ -271,7 +271,7 @@ def convert_audio_to_text(audio_path, progress=gr.Progress(track_tqdm=True)):
         error_msg = f"Failed to convert audio to text: {e}"
         logging.error(error_msg)
         traceback.print_exc()
-        gr.Warning(error_msg)
+        #gr.Warning(error_msg)
         return gr.update(value="Transcription failed. Please check logs for details.", visible=True)
 
         # Schedule deletion of the file after returning it
@@ -290,7 +290,7 @@ def convert_text_to_speech(text, speaker, progress=gr.Progress(track_tqdm=True))
     if not api_key: 
         error_msg = "SarvamAI API key not set. Please configure the SARVAMAI_API_KEY environment variable."
         logging.error(error_msg)
-        gr.Error(error_msg)
+        #gr.Error(error_msg)
         return gr.update(visible=False)
     if not text.strip():
         gr.Warning("Please enter some text to convert to speech.")
@@ -323,7 +323,7 @@ def convert_text_to_speech(text, speaker, progress=gr.Progress(track_tqdm=True))
         error_msg = f"Failed to convert text to speech: {e}"
         logging.error(error_msg)
         traceback.print_exc()
-        gr.Warning(error_msg)
+        #gr.Warning(error_msg)
         return gr.update(value="Speech synthesis failed. Please check logs for details.", visible=True) 
 
 # --- UI Definition ---
