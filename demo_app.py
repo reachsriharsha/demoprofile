@@ -13,6 +13,7 @@ from datetime import datetime
 from pydub import AudioSegment
 from dotenv import load_dotenv
 import threading
+from user_manager import UserManager
 
 # Load environment variables from a .env file
 load_dotenv()
@@ -33,11 +34,26 @@ app_state = {
     "current_page": "login"
 }
 
+# Initialize User Manager
+user_manager = UserManager(db_path="user_logins.db")
+
 # --- Event Handlers ---
 
 def handle_email_submit(email):
     """Handle email submission and navigate to the home page."""
     if email and "@" in email and "." in email:
+        # Record the login in the database
+        login_success = user_manager.record_login(email)
+        
+        if login_success:
+            logging.info(f"Successfully recorded login for {email}")
+            # Get user info to show last login (optional)
+            user_info = user_manager.get_user_login_info(email)
+            if user_info:
+                logging.info(f"User {email} last login: {user_info['last_login_formatted']}")
+        else:
+            logging.warning(f"Failed to record login for {email}")
+        
         app_state["user_email"] = email
         app_state["current_page"] = "home"
         # Hide login, show home
@@ -243,6 +259,14 @@ def convert_audio_to_text(audio_path, progress=gr.Progress(track_tqdm=True)):
         gr.Warning("No audio file to process. Please record audio first.")
         return gr.update(visible=False)
 
+    # Check user quota before proceeding
+    user_email = app_state.get("user_email", "")
+    if user_email:
+        quota_check = user_manager.check_voice_to_text_quota(user_email)
+        if not quota_check['can_use']:
+            gr.Warning(quota_check['message'])
+            return gr.update(value=quota_check['message'], visible=True)
+
     api_key = os.environ.get("SARVAMAI_API_KEY")
     if not api_key:
         error_msg = "SarvamAI API key not set. Please configure the SARVAMAI_API_KEY environment variable."
@@ -266,6 +290,11 @@ def convert_audio_to_text(audio_path, progress=gr.Progress(track_tqdm=True)):
         etime = datetime.now()
         elapsed_time = (etime - stime).total_seconds()
         logging.info(f"✅ Transcription Response: {response}. {elapsed_time:.2f} seconds")
+        
+        # Increment usage count after successful transcription
+        if user_email:
+            user_manager.increment_voice_to_text_usage(user_email)
+        
         return gr.update(value=response.transcript, visible=True)
     except Exception as e:
         error_msg = f"Failed to convert audio to text: {e}"
@@ -277,13 +306,30 @@ def convert_audio_to_text(audio_path, progress=gr.Progress(track_tqdm=True)):
         # Schedule deletion of the file after returning it
 def delete_temp_file(path):
     try:
-        os.remove(path)
-        logging.info(f"Deleted temporary file: {path}")
+        if os.path.exists(path):
+            os.remove(path)
+            logging.info(f"Deleted temporary file: {path}")
+        else:
+            logging.warning(f"Temporary file not found for deletion: {path}")
     except Exception as e:
         logging.error(f"Failed to delete temporary file {path}: {e}")
 
 def convert_text_to_speech(text, speaker, progress=gr.Progress(track_tqdm=True)):
     """Converts the provided text to speech using SarvamAI."""
+    # Voice mapping from generic names to actual speaker names
+    voice_mapping = {
+        "voice1": "anushka",
+        "voice2": "abhilash", 
+        "voice3": "manisha",
+        "voice4": "vidya",
+        "voice5": "arya",
+        "voice6": "karun",
+        "voice7": "hitesh"
+    }
+    
+    # Map the selected voice to actual speaker name
+    actual_speaker = voice_mapping.get(speaker, "anushka")  # Default to anushka if mapping fails
+    
     audios_dir = "./audios"
     os.makedirs(audios_dir, exist_ok=True)
     api_key = os.environ.get("SARVAMAI_API_KEY")
@@ -303,7 +349,7 @@ def convert_text_to_speech(text, speaker, progress=gr.Progress(track_tqdm=True))
         stime = datetime.now()  
         audio = client.text_to_speech.convert(
             text="".join(text.split()[:50]),# Limit to first 50 characters 
-            speaker=speaker,
+            speaker=actual_speaker,  # Use the mapped speaker name
             model="bulbul:v2",
             target_language_code="en-IN"
         )
@@ -317,7 +363,7 @@ def convert_text_to_speech(text, speaker, progress=gr.Progress(track_tqdm=True))
         logging.info(f"✅ Speech Response time  {elapsed_time:.2f} seconds")
         logging.info(f"Generated synthesized speech at {saved_audio_path}")
         # Schedule deletion of the file after returning it
-        threading.Timer(30, delete_temp_file, args=[saved_audio_path]).start()
+        threading.Timer(300, delete_temp_file, args=[saved_audio_path]).start()
         return gr.update(value=saved_audio_path, visible=True)
     except Exception as e:
         error_msg = f"Failed to convert text to speech: {e}"
@@ -563,8 +609,8 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
                 #list of voices from sarvamai
                 t2v_speaker_dropdown = gr.Dropdown(
                     label="Select Speaker",
-                    choices=["anushka", "abhilash", "manisha", "vidya", "arya", "karun", "hitesh"],  # Example speakers
-                    value="anushka",
+                    choices=["voice1", "voice2", "voice3", "voice4", "voice5", "voice6", "voice7"],  # Generic voice names
+                    value="voice1",
                     interactive=True
                 )                   
                 t2v_convert_button = gr.Button("Convert to Speech", variant="primary")
@@ -673,10 +719,15 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
 
 # --- App Launch ---
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", 
-                share=False, 
-                debug=True,
-                ssl_certfile="certificates/server.crt",
-                ssl_keyfile="certificates/server.key",
-                ssl_verify=False  # Disable SSL verification for self-signed certs
-                )
+    try:
+        demo.launch(server_name="0.0.0.0", 
+                    share=False, 
+                    debug=True,
+                    ssl_certfile="certificates/server.crt",
+                    ssl_keyfile="certificates/server.key",
+                    ssl_verify=False  # Disable SSL verification for self-signed certs
+                    )
+    finally:
+        # Clean up database connections when app shuts down
+        user_manager.close()
+        logging.info("Application shut down gracefully")
