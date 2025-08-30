@@ -28,18 +28,15 @@ logging.basicConfig(
 )
 
 # --- State Management ---
-# Using a dictionary for a more structured state
-app_state = {
-    "user_email": "",
-    "current_page": "login"
-}
+# Session-based state management using Gradio State components
+# No global state needed - each session will have its own state
 
 # Initialize User Manager
 user_manager = UserManager(db_path="user_logins.db")
 
 # --- Event Handlers ---
 
-def handle_email_submit(email):
+def handle_email_submit(email, session_state):
     """Handle email submission and navigate to the home page."""
     if email and "@" in email and "." in email:
         # Record the login in the database
@@ -54,40 +51,52 @@ def handle_email_submit(email):
         else:
             logging.warning(f"Failed to record login for {email}")
         
-        app_state["user_email"] = email
-        app_state["current_page"] = "home"
+        # Update session state
+        new_session_state = {
+            "user_email": email,
+            "current_page": "home"
+        }
+        
         # Hide login, show home
         return (
             gr.update(visible=False),
             gr.update(visible=True),
-            f"Welcome, {email}!"
+            f"Welcome, {email}!",
+            new_session_state
         )
     else:
         # Stay on login, show error
         return (
             gr.update(visible=True),
             gr.update(visible=False),
-            "Please enter a valid email address."
+            "Please enter a valid email address.",
+            session_state
         )
 
-def show_app_page(app_name):
+def show_app_page(app_name, session_state):
     """Navigate from home to a specific application page."""
-    app_state["current_page"] = f"app_{app_name}"
+    new_session_state = session_state.copy() if session_state else {}
+    new_session_state["current_page"] = f"app_{app_name}"
+    
     # Hide home, show the generic app page with updated content
     return (
         gr.update(visible=False), # home_page
         gr.update(visible=True),  # app_page
         f"📱 {app_name}",
-        f"This is the placeholder for the '{app_name}' application. You can build its specific UI here."
+        f"This is the placeholder for the '{app_name}' application. You can build its specific UI here.",
+        new_session_state
     )
 
-def go_home():
+def go_home(session_state):
     """Navigate back to the home page from an app page."""
-    app_state["current_page"] = "home"
+    new_session_state = session_state.copy() if session_state else {}
+    new_session_state["current_page"] = "home"
+    
     # Hide app page, show home
     return (
         gr.update(visible=False), # app_page
-        gr.update(visible=True)   # home_page
+        gr.update(visible=True),  # home_page
+        new_session_state
     )
 
 def handle_pdf_upload(pdf_file, progress=gr.Progress(track_tqdm=True)):
@@ -253,14 +262,14 @@ def handle_recording(audio_path):
         gr.Warning(f"Failed to process audio:")
         return (gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), None)
 
-def convert_audio_to_text(audio_path, progress=gr.Progress(track_tqdm=True)):
+def convert_audio_to_text(audio_path, session_state, progress=gr.Progress(track_tqdm=True)):
     """Converts the saved audio file to text using SarvamAI."""
     if not audio_path:
         gr.Warning("No audio file to process. Please record audio first.")
         return gr.update(visible=False)
 
     # Check user quota before proceeding
-    user_email = app_state.get("user_email", "")
+    user_email = session_state.get("user_email", "") if session_state else ""
     if user_email:
         quota_check = user_manager.check_voice_to_text_quota(user_email)
         if not quota_check['can_use']:
@@ -505,6 +514,9 @@ def create_app_button(name):
     return gr.Button(name, elem_classes=["app-button"])
 
 with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
+    # Session state to track user information across the session
+    session_state = gr.State(value={"user_email": "", "current_page": "login"})
+    
     # Header (visible on all pages)
     gr.HTML("""
     <div class="header-container">
@@ -621,13 +633,13 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
     # Login action
     login_button.click(
         fn=handle_email_submit,
-        inputs=[email_input],
-        outputs=[login_page, home_page, welcome_msg]
+        inputs=[email_input, session_state],
+        outputs=[login_page, home_page, welcome_msg, session_state]
     )
     email_input.submit(
         fn=handle_email_submit,
-        inputs=[email_input],
-        outputs=[login_page, home_page, welcome_msg]
+        inputs=[email_input, session_state],
+        outputs=[login_page, home_page, welcome_msg, session_state]
     )
 
     # App navigation actions
@@ -635,57 +647,57 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
         if name == "PDF Extraction":
             # Special navigation for PDF Extraction page
             button.click(
-                fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
-                inputs=[],
+                fn=lambda session_state: (gr.update(visible=False), gr.update(visible=True)),
+                inputs=[session_state],
                 outputs=[home_page, pdf_extraction_page]
             )
         elif name == "Voice to Text":
             # Special navigation for Voice to Text page
             button.click(
-                fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
-                inputs=[],
+                fn=lambda session_state: (gr.update(visible=False), gr.update(visible=True)),
+                inputs=[session_state],
                 outputs=[home_page, voice_to_text_page]
             )
         elif name == "Text to Voice":
             # Special navigation for Text to Speech page
             button.click(
-                fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
-                inputs=[],
+                fn=lambda session_state: (gr.update(visible=False), gr.update(visible=True)),
+                inputs=[session_state],
                 outputs=[home_page, text_to_voice_page]
             )
         else:
             # Generic navigation for other apps
             button.click(
-                fn=lambda app_name=name: show_app_page(app_name),
-                inputs=[],
-                outputs=[home_page, app_page, app_title, app_placeholder]
+                fn=lambda session_state, app_name=name: show_app_page(app_name, session_state),
+                inputs=[session_state],
+                outputs=[home_page, app_page, app_title, app_placeholder, session_state]
             )
 
     # Back button action from generic page
     back_button.click(
         fn=go_home,
-        inputs=[],
-        outputs=[app_page, home_page]
+        inputs=[session_state],
+        outputs=[app_page, home_page, session_state]
     )
 
     # Back button action from PDF page
     pdf_back_button.click(
-        fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
-        inputs=[],
+        fn=lambda session_state: (gr.update(visible=False), gr.update(visible=True)),
+        inputs=[session_state],
         outputs=[pdf_extraction_page, home_page]
     )
 
     # Back button action from Voice to Text page
     v2t_back_button.click(
-        fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
-        inputs=[],
+        fn=lambda session_state: (gr.update(visible=False), gr.update(visible=True)),
+        inputs=[session_state],
         outputs=[voice_to_text_page, home_page]
     )
 
     # Back button action from Text to Speech page
     t2v_back_button.click(
-        fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
-        inputs=[],
+        fn=lambda session_state: (gr.update(visible=False), gr.update(visible=True)),
+        inputs=[session_state],
         outputs=[text_to_voice_page, home_page]
     )
 
@@ -705,7 +717,7 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
 
     v2t_convert_button.click(
         fn=convert_audio_to_text,
-        inputs=[v2t_audio_path_state],
+        inputs=[v2t_audio_path_state, session_state],
         outputs=[v2t_text_output]
     )
     
