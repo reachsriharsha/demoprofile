@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  gradio_app:
+    build: .
+    container_name: gradio_portfolio_app
+    ports:
+      - "7860:7860"
+    volumes:
+      # Mount local directories to persist uploads, audio files, and logs
+      - ./uploads:/app/uploads
+      - ./audios:/app/audios
+      - ./gradio_app.log:/app/gradio_app.log
+    env_file:
+      - .env
+    restart: unless-stopped

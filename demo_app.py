@@ -753,7 +753,7 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", 
                 share=False, 
-                debug=True,
+                debug=False,
                 ssl_certfile="certificates/server.crt",
                 ssl_keyfile="certificates/server.key",
                 ssl_verify=False  # Disable SSL verification for self-signed certs
