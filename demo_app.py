@@ -326,6 +326,55 @@ def convert_text_to_speech(text, speaker, progress=gr.Progress(track_tqdm=True))
         gr.Warning(error_msg)
         return gr.update(value="Speech synthesis failed. Please check logs for details.", visible=True) 
 
+def handle_ocr_upload(file, progress=gr.Progress(track_tqdm=True)):
+    """Handle image or PDF file upload and extract text using OCR."""
+    progress(0, desc="Starting OCR processing...")
+    if not file:
+        return gr.update(value="Please upload an image or PDF file first.", visible=True)
+    elif not file.name.lower().endswith(('.png', '.jpg', '.jpeg', '.pdf')):
+        return gr.update(value="Unsupported file type. Please upload a PNG, JPG, JPEG, or PDF file.", visible=True)
+    else:
+        upload_dir = "./uploads"
+        os.makedirs(upload_dir, exist_ok=True)
+        try:
+            progress(0.1, desc="Saving uploaded file...")
+            original_filename = os.path.basename(file.name)
+            random_prefix = uuid.uuid4().hex[:8]
+            new_filename = f"{random_prefix}_{original_filename}"
+            destination_path = os.path.join(upload_dir, new_filename)
+            shutil.copy(file.name, destination_path)
+            logging.info(f'File saving completed for OCR: {destination_path}')
+
+            progress(0.3, desc="Extracting text with OCR...")
+            from PIL import Image
+            import pytesseract
+            from pdf2image import convert_from_path
+
+            if file.name.lower().endswith(".pdf"):
+            # Convert PDF to images
+                images = convert_from_path(destination_path)
+                extracted_text = ""
+                for i, image in enumerate(images):
+                    page_text = pytesseract.image_to_string(image)
+                    extracted_text += f"\n--- Page {i + 1} ---\n{page_text}"
+            else:
+            # Process image files
+                image = Image.open(destination_path)
+                extracted_text = pytesseract.image_to_string(image)
+
+                progress(0.9, desc="Finalizing results...")
+                if not extracted_text.strip():
+                    extracted_text = "No text found in the file."
+            return gr.update(value=extracted_text, visible=True)
+        except Exception as e:
+            logging.error(f'An error occurred during OCR processing: {str(e)}')
+            traceback.print_exc()
+            error_message = f"❌ An error occurred during OCR processing."
+            return (
+            gr.update(value=error_message, visible=True),
+            gr.update(value=None, visible=False)  # No images to show
+            )
+
 # --- UI Definition ---
 
 # Custom CSS for a modern and clean look
@@ -570,6 +619,15 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
                 t2v_convert_button = gr.Button("Convert to Speech", variant="primary")
                 t2v_audio_output = gr.Audio(label="Speech Output", type="filepath", visible=False)
 
+    with gr.Column(visible=False) as image_to_text_page:
+        with gr.Row():
+            with gr.Column(elem_classes=["page-container"]):
+                ocr_back_button = gr.Button("← Back to Home", elem_classes=["back-button"])
+                gr.HTML('<h2 class="page-title">🖼️ Image to Text</h2>')
+                gr.HTML("<p class='welcome-text'>Upload an image or pdf file to extract text using OCR.</p>")
+                image_upload_input = gr.File(label="Upload Image or PDF", file_types=[".png", ".jpg", ".jpeg",".pdf"])
+                image_text_output = gr.Textbox(label="Extracted Text", lines=10, visible=False, show_copy_button=True) 
+
     # --- Event Wiring ---
 
     # Login action
@@ -607,6 +665,13 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
                 inputs=[],
                 outputs=[home_page, text_to_voice_page]
             )
+        elif name == "PDF OCR Extraction":
+            # Special navigation for OCR page
+            button.click(
+                fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
+                inputs=[],
+                outputs=[home_page, image_to_text_page]
+            )
         else:
             # Generic navigation for other apps
             button.click(
@@ -643,6 +708,12 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
         outputs=[text_to_voice_page, home_page]
     )
 
+    ocr_back_button.click(
+        fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
+        inputs=[],
+        outputs=[image_to_text_page, home_page]
+    )
+
     # PDF Upload action
     pdf_upload_input.upload(
         fn=handle_pdf_upload,
@@ -668,6 +739,13 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
         fn=convert_text_to_speech,
         inputs=[t2v_text_input,t2v_speaker_dropdown],
         outputs=[t2v_audio_output]
+    )
+    
+    # OCR Upload action
+    image_upload_input.upload(
+        fn=handle_ocr_upload,
+        inputs=[image_upload_input],
+        outputs=[image_text_output]
     )
 
 
