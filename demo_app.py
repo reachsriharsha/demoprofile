@@ -13,6 +13,7 @@ from datetime import datetime
 from pydub import AudioSegment
 from dotenv import load_dotenv
 import threading
+from user_manager import UserManager
 
 # Load environment variables from a .env file
 load_dotenv()
@@ -27,51 +28,75 @@ logging.basicConfig(
 )
 
 # --- State Management ---
-# Using a dictionary for a more structured state
-app_state = {
-    "user_email": "",
-    "current_page": "login"
-}
+# Session-based state management using Gradio State components
+# No global state needed - each session will have its own state
+
+# Initialize User Manager
+user_manager = UserManager(db_path="user_logins.db")
 
 # --- Event Handlers ---
 
-def handle_email_submit(email):
+def handle_email_submit(email, session_state):
     """Handle email submission and navigate to the home page."""
     if email and "@" in email and "." in email:
-        app_state["user_email"] = email
-        app_state["current_page"] = "home"
+        # Record the login in the database
+        login_success = user_manager.record_login(email)
+        
+        if login_success:
+            logging.info(f"Successfully recorded login for {email}")
+            # Get user info to show last login (optional)
+            user_info = user_manager.get_user_login_info(email)
+            if user_info:
+                logging.info(f"User {email} last login: {user_info['last_login_formatted']}")
+        else:
+            logging.warning(f"Failed to record login for {email}")
+        
+        # Update session state
+        new_session_state = {
+            "user_email": email,
+            "current_page": "home"
+        }
+        
         # Hide login, show home
         return (
             gr.update(visible=False),
             gr.update(visible=True),
-            f"Welcome, {email}!"
+            f"Welcome, {email}!",
+            new_session_state
         )
     else:
         # Stay on login, show error
         return (
             gr.update(visible=True),
             gr.update(visible=False),
-            "Please enter a valid email address."
+            "Please enter a valid email address.",
+            session_state
         )
 
-def show_app_page(app_name):
+def show_app_page(app_name, session_state):
     """Navigate from home to a specific application page."""
-    app_state["current_page"] = f"app_{app_name}"
+    new_session_state = session_state.copy() if session_state else {}
+    new_session_state["current_page"] = f"app_{app_name}"
+    
     # Hide home, show the generic app page with updated content
     return (
         gr.update(visible=False), # home_page
         gr.update(visible=True),  # app_page
         f"📱 {app_name}",
-        f"This is the placeholder for the '{app_name}' application. You can build its specific UI here."
+        f"This is the placeholder for the '{app_name}' application. You can build its specific UI here.",
+        new_session_state
     )
 
-def go_home():
+def go_home(session_state):
     """Navigate back to the home page from an app page."""
-    app_state["current_page"] = "home"
+    new_session_state = session_state.copy() if session_state else {}
+    new_session_state["current_page"] = "home"
+    
     # Hide app page, show home
     return (
         gr.update(visible=False), # app_page
-        gr.update(visible=True)   # home_page
+        gr.update(visible=True),  # home_page
+        new_session_state
     )
 
 def handle_pdf_upload(pdf_file, progress=gr.Progress(track_tqdm=True)):
@@ -234,20 +259,28 @@ def handle_recording(audio_path):
     except Exception as e:
         logging.error(f"Error processing audio: {e}")
         traceback.print_exc()
-        gr.Warning(f"Failed to process audio: {e}")
+        gr.Warning(f"Failed to process audio:")
         return (gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), None)
 
-def convert_audio_to_text(audio_path, progress=gr.Progress(track_tqdm=True)):
+def convert_audio_to_text(audio_path, session_state, progress=gr.Progress(track_tqdm=True)):
     """Converts the saved audio file to text using SarvamAI."""
     if not audio_path:
         gr.Warning("No audio file to process. Please record audio first.")
         return gr.update(visible=False)
 
+    # Check user quota before proceeding
+    user_email = session_state.get("user_email", "") if session_state else ""
+    if user_email:
+        quota_check = user_manager.check_voice_to_text_quota(user_email)
+        if not quota_check['can_use']:
+            gr.Warning(quota_check['message'])
+            return gr.update(value=quota_check['message'], visible=True)
+
     api_key = os.environ.get("SARVAMAI_API_KEY")
     if not api_key:
         error_msg = "SarvamAI API key not set. Please configure the SARVAMAI_API_KEY environment variable."
         logging.error(error_msg)
-        gr.Error(error_msg)
+        #gr.Error(error_msg)
         return gr.update(visible=False)
 
     progress(0, desc="Starting conversion...")
@@ -266,31 +299,61 @@ def convert_audio_to_text(audio_path, progress=gr.Progress(track_tqdm=True)):
         etime = datetime.now()
         elapsed_time = (etime - stime).total_seconds()
         logging.info(f"✅ Transcription Response: {response}. {elapsed_time:.2f} seconds")
+        
+        # Increment usage count after successful transcription
+        if user_email:
+            user_manager.increment_voice_to_text_usage(user_email)
+        
         return gr.update(value=response.transcript, visible=True)
     except Exception as e:
         error_msg = f"Failed to convert audio to text: {e}"
         logging.error(error_msg)
         traceback.print_exc()
-        gr.Warning(error_msg)
+        #gr.Warning(error_msg)
         return gr.update(value="Transcription failed. Please check logs for details.", visible=True)
 
         # Schedule deletion of the file after returning it
 def delete_temp_file(path):
     try:
-        os.remove(path)
-        logging.info(f"Deleted temporary file: {path}")
+        if os.path.exists(path):
+            os.remove(path)
+            logging.info(f"Deleted temporary file: {path}")
+        else:
+            logging.warning(f"Temporary file not found for deletion: {path}")
     except Exception as e:
         logging.error(f"Failed to delete temporary file {path}: {e}")
 
-def convert_text_to_speech(text, speaker, progress=gr.Progress(track_tqdm=True)):
+def convert_text_to_speech(text, speaker, session_state, progress=gr.Progress(track_tqdm=True)):
     """Converts the provided text to speech using SarvamAI."""
+    # Check user quota before proceeding
+    user_email = session_state.get("user_email", "") if session_state else ""
+    if user_email:
+        quota_check = user_manager.check_text_to_voice_quota(user_email)
+        if not quota_check['can_use']:
+            gr.Warning(quota_check['message'])
+            return gr.update(value="Speech synthesis quota exceeded. Please check logs for details.", visible=True)
+
+    # Voice mapping from generic names to actual speaker names
+    voice_mapping = {
+        "voice1": "anushka",
+        "voice2": "abhilash", 
+        "voice3": "manisha",
+        "voice4": "vidya",
+        "voice5": "arya",
+        "voice6": "karun",
+        "voice7": "hitesh"
+    }
+    
+    # Map the selected voice to actual speaker name
+    actual_speaker = voice_mapping.get(speaker, "anushka")  # Default to anushka if mapping fails
+    
     audios_dir = "./audios"
     os.makedirs(audios_dir, exist_ok=True)
     api_key = os.environ.get("SARVAMAI_API_KEY")
     if not api_key: 
         error_msg = "SarvamAI API key not set. Please configure the SARVAMAI_API_KEY environment variable."
         logging.error(error_msg)
-        gr.Error(error_msg)
+        #gr.Error(error_msg)
         return gr.update(visible=False)
     if not text.strip():
         gr.Warning("Please enter some text to convert to speech.")
@@ -303,7 +366,7 @@ def convert_text_to_speech(text, speaker, progress=gr.Progress(track_tqdm=True))
         stime = datetime.now()  
         audio = client.text_to_speech.convert(
             text="".join(text.split()[:50]),# Limit to first 50 characters 
-            speaker=speaker,
+            speaker=actual_speaker,  # Use the mapped speaker name
             model="bulbul:v2",
             target_language_code="en-IN"
         )
@@ -316,14 +379,19 @@ def convert_text_to_speech(text, speaker, progress=gr.Progress(track_tqdm=True))
         elapsed_time = (etime - stime).total_seconds()
         logging.info(f"✅ Speech Response time  {elapsed_time:.2f} seconds")
         logging.info(f"Generated synthesized speech at {saved_audio_path}")
+        
+        # Increment usage count after successful synthesis
+        if user_email:
+            user_manager.increment_text_to_voice_usage(user_email)
+        
         # Schedule deletion of the file after returning it
-        threading.Timer(30, delete_temp_file, args=[saved_audio_path]).start()
+        threading.Timer(300, delete_temp_file, args=[saved_audio_path]).start()
         return gr.update(value=saved_audio_path, visible=True)
     except Exception as e:
         error_msg = f"Failed to convert text to speech: {e}"
         logging.error(error_msg)
         traceback.print_exc()
-        gr.Warning(error_msg)
+        #gr.Warning(error_msg)
         return gr.update(value="Speech synthesis failed. Please check logs for details.", visible=True) 
 
 def handle_ocr_upload(file, progress=gr.Progress(track_tqdm=True)):
@@ -508,6 +576,9 @@ def create_app_button(name):
     return gr.Button(name, elem_classes=["app-button"])
 
 with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
+    # Session state to track user information across the session
+    session_state = gr.State(value={"user_email": "", "current_page": "login"})
+    
     # Header (visible on all pages)
     gr.HTML("""
     <div class="header-container">
@@ -612,8 +683,8 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
                 #list of voices from sarvamai
                 t2v_speaker_dropdown = gr.Dropdown(
                     label="Select Speaker",
-                    choices=["anushka", "abhilash", "manisha", "vidya", "arya", "karun", "hitesh"],  # Example speakers
-                    value="anushka",
+                    choices=["voice1", "voice2", "voice3", "voice4", "voice5", "voice6", "voice7"],  # Generic voice names
+                    value="voice1",
                     interactive=True
                 )                   
                 t2v_convert_button = gr.Button("Convert to Speech", variant="primary")
@@ -633,13 +704,13 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
     # Login action
     login_button.click(
         fn=handle_email_submit,
-        inputs=[email_input],
-        outputs=[login_page, home_page, welcome_msg]
+        inputs=[email_input, session_state],
+        outputs=[login_page, home_page, welcome_msg, session_state]
     )
     email_input.submit(
         fn=handle_email_submit,
-        inputs=[email_input],
-        outputs=[login_page, home_page, welcome_msg]
+        inputs=[email_input, session_state],
+        outputs=[login_page, home_page, welcome_msg, session_state]
     )
 
     # App navigation actions
@@ -647,22 +718,22 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
         if name == "PDF Extraction":
             # Special navigation for PDF Extraction page
             button.click(
-                fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
-                inputs=[],
+                fn=lambda session_state: (gr.update(visible=False), gr.update(visible=True)),
+                inputs=[session_state],
                 outputs=[home_page, pdf_extraction_page]
             )
         elif name == "Voice to Text":
             # Special navigation for Voice to Text page
             button.click(
-                fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
-                inputs=[],
+                fn=lambda session_state: (gr.update(visible=False), gr.update(visible=True)),
+                inputs=[session_state],
                 outputs=[home_page, voice_to_text_page]
             )
         elif name == "Text to Voice":
             # Special navigation for Text to Speech page
             button.click(
-                fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
-                inputs=[],
+                fn=lambda session_state: (gr.update(visible=False), gr.update(visible=True)),
+                inputs=[session_state],
                 outputs=[home_page, text_to_voice_page]
             )
         elif name == "PDF OCR Extraction":
@@ -675,36 +746,36 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
         else:
             # Generic navigation for other apps
             button.click(
-                fn=lambda app_name=name: show_app_page(app_name),
-                inputs=[],
-                outputs=[home_page, app_page, app_title, app_placeholder]
+                fn=lambda session_state, app_name=name: show_app_page(app_name, session_state),
+                inputs=[session_state],
+                outputs=[home_page, app_page, app_title, app_placeholder, session_state]
             )
 
     # Back button action from generic page
     back_button.click(
         fn=go_home,
-        inputs=[],
-        outputs=[app_page, home_page]
+        inputs=[session_state],
+        outputs=[app_page, home_page, session_state]
     )
 
     # Back button action from PDF page
     pdf_back_button.click(
-        fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
-        inputs=[],
+        fn=lambda session_state: (gr.update(visible=False), gr.update(visible=True)),
+        inputs=[session_state],
         outputs=[pdf_extraction_page, home_page]
     )
 
     # Back button action from Voice to Text page
     v2t_back_button.click(
-        fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
-        inputs=[],
+        fn=lambda session_state: (gr.update(visible=False), gr.update(visible=True)),
+        inputs=[session_state],
         outputs=[voice_to_text_page, home_page]
     )
 
     # Back button action from Text to Speech page
     t2v_back_button.click(
-        fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
-        inputs=[],
+        fn=lambda session_state: (gr.update(visible=False), gr.update(visible=True)),
+        inputs=[session_state],
         outputs=[text_to_voice_page, home_page]
     )
 
@@ -730,14 +801,14 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
 
     v2t_convert_button.click(
         fn=convert_audio_to_text,
-        inputs=[v2t_audio_path_state],
+        inputs=[v2t_audio_path_state, session_state],
         outputs=[v2t_text_output]
     )
     
     # Text to Speech actions
     t2v_convert_button.click(
         fn=convert_text_to_speech,
-        inputs=[t2v_text_input,t2v_speaker_dropdown],
+        inputs=[t2v_text_input, t2v_speaker_dropdown, session_state],
         outputs=[t2v_audio_output]
     )
     
@@ -751,10 +822,15 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
 
 # --- App Launch ---
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", 
-                share=False, 
-                debug=False,
-                ssl_certfile="certificates/server.crt",
-                ssl_keyfile="certificates/server.key",
-                ssl_verify=False  # Disable SSL verification for self-signed certs
-                )
+    try:
+        demo.launch(server_name="0.0.0.0", 
+                    share=False, 
+                    debug=True,
+                    ssl_certfile="certificates/server.crt",
+                    ssl_keyfile="certificates/server.key",
+                    ssl_verify=False  # Disable SSL verification for self-signed certs
+                    )
+    finally:
+        # Clean up database connections when app shuts down
+        user_manager.close()
+        logging.info("Application shut down gracefully")
