@@ -97,3 +97,5 @@ websockets==15.0.1
 xlrd==2.0.2
 xlsxwriter==3.2.5
 youtube-transcript-api==1.0.3
+pytesseract==0.3.13
+pdf2image==1.17.0
