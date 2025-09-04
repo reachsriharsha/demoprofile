@@ -13,7 +13,7 @@ sudo systemctl enable nginx
 
 ```bash
 sudo nano /etc/nginx/sites-available/lusidlogix.com
-```
+
 
 server {
     listen 80;
@@ -33,7 +33,7 @@ server {
         proxy_set_header Connection "upgrade";
     }
 }
-
+```
 
 Enable the site:
 
