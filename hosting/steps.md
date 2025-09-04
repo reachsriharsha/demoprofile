@@ -82,3 +82,31 @@ services:
       - /etc/letsencrypt:/etc/letsencrypt:ro
     restart: unless-stopped
 ```
+
+# Step 5: Configure Cloudflare Settings
+1. In Cloudflare dashboard, go to SSL/TLS:
+   Set SSL/TLS encryption mode to "Full (strict)"
+   This ensures end-to-end encryption
+2. Enable security features (recommended):
+    - Under "Security" → "WAF" → Enable Web Application Firewall
+    - Under "Speed" → "Optimization" → Enable Auto Minify for CSS, HTML, JS
+
+# Step 6: Firewall Configuration
+
+```bash
+# Allow SSH, HTTP, and HTTPS
+sudo ufw allow ssh
+sudo ufw allow 'Nginx Full'
+sudo ufw enable
+
+# Block direct access to Gradio port (optional security measure)
+sudo ufw deny 7860
+```
+# Verification Steps
+
+Test your domain: Visit https://lusidlogix.com in a browser
+Check SSL: Look for the padlock icon in the address bar
+Test Gradio functionality: Ensure your app works as expected
+Check logs if issues occur:
+
+Nginx: sudo tail -f /var/log/nginx/error.log
