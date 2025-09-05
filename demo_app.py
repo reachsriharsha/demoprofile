@@ -22,7 +22,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('gradio_app.log'),
+   #     logging.FileHandler('gradio_app.log'),
         logging.StreamHandler()  # Also log to console
     ]
 )
