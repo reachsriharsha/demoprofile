@@ -15,6 +15,21 @@ from dotenv import load_dotenv
 import threading
 from user_manager import UserManager
 
+# RAG-related imports
+import chromadb
+from chromadb.config import Settings
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import ChatOpenAI
+from langchain_chroma import Chroma
+from langchain.schema import Document
+from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
+from langchain.embeddings.base import Embeddings
+from sentence_transformers import SentenceTransformer
+import openai
+import numpy as np
+from typing import List
+
 # Load environment variables from a .env file
 load_dotenv()
 
@@ -22,7 +37,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('gradio_app.log'),
+   #     logging.FileHandler('gradio_app.log'),
         logging.StreamHandler()  # Also log to console
     ]
 )
@@ -33,6 +48,160 @@ logging.basicConfig(
 
 # Initialize User Manager
 user_manager = UserManager(db_path="user_logins.db")
+
+# --- Custom Embeddings Class for CPU-based Sentence Transformers ---
+class SentenceTransformerEmbeddings(Embeddings):
+    """Custom embeddings class using Sentence Transformers for CPU-based embeddings"""
+    
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+        self.model = SentenceTransformer(model_name)
+    
+    def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        """Embed a list of documents"""
+        embeddings = self.model.encode(texts)
+        return embeddings.tolist()
+    
+    def embed_query(self, text: str) -> List[float]:
+        """Embed a single query"""
+        embedding = self.model.encode([text])
+        return embedding[0].tolist()
+
+# --- RAG System Configuration ---
+class RAGSystem:
+    def __init__(self):
+        self.vectorstore = None
+        self.qa_chain = None
+        self.current_file_id = None
+        
+    def create_vectorstore(self, documents, file_id):
+        """Create a new vector store from documents"""
+        try:
+            # Initialize lightweight CPU-based embeddings using Sentence Transformers
+            # Using all-MiniLM-L6-v2 model which is fast and efficient on CPU
+            embeddings = SentenceTransformerEmbeddings(
+                model_name="all-MiniLM-L6-v2"
+            )
+            
+            # Create a unique collection name for this session/file
+            collection_name = f"chat_docs_{file_id}"
+            
+            # Initialize ChromaDB client
+            client = chromadb.Client(Settings(anonymized_telemetry=False))
+            
+            # Create vector store
+            self.vectorstore = Chroma(
+                client=client,
+                collection_name=collection_name,
+                embedding_function=embeddings,
+            )
+            
+            # Add documents to vector store
+            self.vectorstore.add_documents(documents)
+            self.current_file_id = file_id
+            
+            # Create QA chain
+            llm = ChatOpenAI(
+                model="gpt-5-nano",
+                temperature=1,
+                openai_api_key=os.environ.get("OPENAI_API_KEY")
+            )
+            
+            # Custom prompt template
+            prompt_template = """
+            You are a helpful AI assistant that answers questions based on the provided document context. 
+            Use the following pieces of context to answer the question at the end. 
+            If you don't know the answer based on the context, just say that you don't know, don't try to make up an answer.
+            
+            Context:
+            {context}
+            
+            Question: {question}
+            
+            Answer: """
+            
+            PROMPT = PromptTemplate(
+                template=prompt_template, 
+                input_variables=["context", "question"]
+            )
+            
+            self.qa_chain = RetrievalQA.from_chain_type(
+                llm=llm,
+                chain_type="stuff",
+                retriever=self.vectorstore.as_retriever(search_kwargs={"k": 3}),
+                chain_type_kwargs={"prompt": PROMPT},
+                return_source_documents=True
+            )
+            
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error creating vector store: {e}")
+            return False
+    
+    def query(self, question):
+        """Query the RAG system"""
+        if not self.qa_chain:
+            return "No document loaded. Please upload a PDF file first."
+        
+        try:
+            result = self.qa_chain.invoke({"query": question})
+            return result["result"]
+        except Exception as e:
+            logging.error(f"Error querying RAG system: {e}")
+            return f"Error processing your question: {str(e)}"
+    
+    def query_stream(self, question):
+        """Query the RAG system with streaming response"""
+        if not self.qa_chain:
+            yield "No document loaded. Please upload a PDF file first."
+            return
+        
+        try:
+            # Get relevant documents
+            docs = self.vectorstore.similarity_search(question, k=3)
+            context = "\n".join([doc.page_content for doc in docs])
+            
+            # Create streaming LLM
+            streaming_llm = ChatOpenAI(
+                model="gpt-5-nano",
+                temperature=1,
+                openai_api_key=os.environ.get("OPENAI_API_KEY"),
+                streaming=True
+            )
+            
+            # Create prompt
+            prompt_template = """
+            You are a helpful AI assistant that answers questions based on the provided document context. 
+            Use the following pieces of context to answer the question at the end. 
+            If you don't know the answer based on the context, just say that you don't know, don't try to make up an answer.
+            
+            Context:
+            {context}
+            
+            Question: {question}
+            
+            Answer: """
+            
+            # Format the prompt
+            formatted_prompt = prompt_template.format(context=context, question=question)
+            
+            # Stream the response
+            for chunk in streaming_llm.stream(formatted_prompt):
+                if chunk.content:
+                    yield chunk.content
+                    
+        except Exception as e:
+            logging.error(f"Error in streaming query: {e}")
+            yield f"Error processing your question: {str(e)}"
+    
+    def clear(self):
+        """Clear the current vector store"""
+        self.vectorstore = None
+        self.qa_chain = None
+        self.current_file_id = None
+
+# Initialize RAG system
+rag_system = RAGSystem()
 
 # --- Event Handlers ---
 
@@ -331,7 +500,7 @@ def convert_text_to_speech(text, speaker, session_state, progress=gr.Progress(tr
         quota_check = user_manager.check_text_to_voice_quota(user_email)
         if not quota_check['can_use']:
             gr.Warning(quota_check['message'])
-            return gr.update(value="Speech synthesis quota exceeded. Please check logs for details.", visible=True)
+            return gr.update(value="Speech synthesis quota exceeded. Please try after 24 hours.", visible=True)
 
     # Voice mapping from generic names to actual speaker names
     voice_mapping = {
@@ -442,6 +611,156 @@ def handle_ocr_upload(file, progress=gr.Progress(track_tqdm=True)):
             gr.update(value=error_message, visible=True),
             gr.update(value=None, visible=False)  # No images to show
             )
+
+def handle_chat_pdf_upload(pdf_file, progress=gr.Progress(track_tqdm=True)):
+    """Handle PDF file upload for chat functionality."""
+    progress(0, desc="Starting PDF processing for chat...")
+    
+    if not pdf_file:
+        return (
+            gr.update(value="Please upload a PDF file first.", visible=True),
+            gr.update(value=[], visible=False),
+            gr.update(interactive=False),
+            gr.update(value=[])
+        )
+    
+    # Check file size (10MB limit)
+    file_size_mb = os.path.getsize(pdf_file.name) / (1024 * 1024)
+    if file_size_mb > 10:
+        return (
+            gr.update(value=f"File size ({file_size_mb:.1f}MB) exceeds 10MB limit. Please upload a smaller file.", visible=True),
+            gr.update(value=[], visible=False),
+            gr.update(interactive=False),
+            gr.update(value=[])
+        )
+    
+    # Check if OpenAI API key is set for the LLM
+    if not os.environ.get("OPENAI_API_KEY"):
+        return (
+            gr.update(value="OpenAI API key not configured for LLM. Please set the OPENAI_API_KEY environment variable.", visible=True),
+            gr.update(value=[], visible=False),
+            gr.update(interactive=False),
+            gr.update(value=[])
+        )
+    
+    try:
+        progress(0.2, desc="Extracting text from PDF...")
+        
+        # Extract text from PDF
+        text_content = ""
+        with open(pdf_file.name, 'rb') as file:
+            text_output = io.BytesIO()
+            extract_text_to_fp(file, text_output, laparams=LAParams())
+            text_content = text_output.getvalue().decode(errors="ignore")
+            text_output.close()
+        
+        if not text_content.strip():
+            return (
+                gr.update(value="No readable text found in the PDF. Please try a different file.", visible=True),
+                gr.update(value=[], visible=False),
+                gr.update(interactive=False),
+                gr.update(value=[])
+            )
+        
+        progress(0.5, desc="Processing text into chunks...")
+        
+        # Split text into chunks
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+            length_function=len,
+        )
+        
+        # Create documents
+        documents = [Document(page_content=text_content, metadata={"source": pdf_file.name})]
+        chunks = text_splitter.split_documents(documents)
+        
+        progress(0.7, desc="Creating vector database...")
+        
+        # Generate unique file ID
+        file_id = uuid.uuid4().hex[:8]
+        
+        # Create vector store
+        success = rag_system.create_vectorstore(chunks, file_id)
+        
+        if success:
+            progress(1.0, desc="Ready for questions!")
+            original_filename = os.path.basename(pdf_file.name)
+            
+            return (
+                gr.update(value=f"✅ **{original_filename}** successfully loaded!\n\n📊 **Document Stats:**\n- File size: {file_size_mb:.1f}MB\n- Text chunks: {len(chunks)}\n- Ready for questions!", visible=True),
+                gr.update(value=[], visible=True),
+                gr.update(interactive=True),
+                gr.update(value=[])
+            )
+        else:
+            return (
+                gr.update(value="❌ Failed to process the PDF. Please check the logs and try again.", visible=True),
+                gr.update(value=[], visible=False),
+                gr.update(interactive=False),
+                gr.update(value=[])
+            )
+            
+    except Exception as e:
+        logging.error(f"Error processing PDF for chat: {e}")
+        traceback.print_exc()
+        return (
+            gr.update(value=f"❌ Error processing PDF: {str(e)}", visible=True),
+            gr.update(value=[], visible=False),
+            gr.update(interactive=False),
+            gr.update(value=[])
+        )
+
+def handle_chat_message(message, chat_history, session_state):
+    """Handle chat messages and return responses from RAG system with streaming."""
+    if not message.strip():
+        yield chat_history, ""
+        return
+    
+    if not rag_system.qa_chain:
+        chat_history.append([message, "Please upload a PDF file first before asking questions."])
+        yield chat_history, ""
+        return
+    
+    # Check user quota before proceeding
+    user_email = session_state.get("user_email", "") if session_state else ""
+    if user_email:
+        quota_check = user_manager.check_pdf_chat_quota(user_email)
+        if not quota_check['can_use']:
+            # Show popup warning
+            gr.Warning(quota_check['message'])
+            # Also add to chat history for context
+            chat_history.append([message, f"❌ {quota_check['message']}"])
+            yield chat_history, ""
+            return
+    
+    try:
+        # Add user message to chat history with empty assistant response
+        chat_history.append([message, ""])
+        
+        # Get streaming response from RAG system
+        partial_response = ""
+        for chunk in rag_system.query_stream(message):
+            partial_response += chunk
+            # Update the last message in chat history with partial response
+            chat_history[-1][1] = partial_response
+            yield chat_history, ""
+        
+        # Increment usage count after successful response
+        if user_email:
+            user_manager.increment_pdf_chat_usage(user_email)
+            logging.info(f"Incremented PDF chat usage for {user_email}")
+        
+    except Exception as e:
+        logging.error(f"Error in chat: {e}")
+        error_response = "Sorry, I encountered an error while processing your question. Please try again."
+        chat_history[-1][1] = error_response
+        yield chat_history, ""
+
+def clear_chat():
+    """Clear the chat history and reset the RAG system."""
+    rag_system.clear()
+    return [], gr.update(value="Chat cleared. Upload a new PDF to start over.", visible=True), gr.update(interactive=False)
 
 # --- UI Definition ---
 
@@ -699,6 +1018,45 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
                 image_upload_input = gr.File(label="Upload Image or PDF", file_types=[".png", ".jpg", ".jpeg",".pdf"])
                 image_text_output = gr.Textbox(label="Extracted Text", lines=10, visible=False, show_copy_button=True) 
 
+    # --- Chat with Files Page ---
+    with gr.Column(visible=False) as chat_with_files_page:
+        with gr.Row():
+            with gr.Column(elem_classes=["page-container"]):
+                chat_back_button = gr.Button("← Back to Home", elem_classes=["back-button"])
+                gr.HTML('<h2 class="page-title">💬 Chat with Files</h2>')
+                gr.HTML("<p class='welcome-text'>Upload a PDF file (max 10MB) and ask questions about its content.</p>")
+                
+                # File upload section
+                with gr.Row():
+                    with gr.Column(scale=2):
+                        chat_pdf_upload = gr.File(
+                            label="Upload PDF File", 
+                            file_types=[".pdf"],
+                            file_count="single"
+                        )
+                    with gr.Column(scale=1):
+                        chat_clear_button = gr.Button("Clear Chat", variant="secondary")
+                
+                # Status display
+                chat_status = gr.Markdown("Upload a PDF file to start chatting.", visible=True)
+                
+                # Chat interface
+                chat_interface = gr.Chatbot(
+                    label="Chat",
+                    height=400,
+                    show_copy_button=True,
+                    visible=False
+                )
+                
+                with gr.Row():
+                    chat_input = gr.Textbox(
+                        label="Ask a question about the document",
+                        placeholder="What is this document about?",
+                        scale=4,
+                        interactive=False
+                    )
+                    chat_send_button = gr.Button("Send", variant="primary", scale=1) 
+
     # --- Event Wiring ---
 
     # Login action
@@ -743,6 +1101,13 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
                 inputs=[],
                 outputs=[home_page, image_to_text_page]
             )
+        elif name == "Chat with Files":
+            # Special navigation for Chat with Files page
+            button.click(
+                fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
+                inputs=[],
+                outputs=[home_page, chat_with_files_page]
+            )
         else:
             # Generic navigation for other apps
             button.click(
@@ -785,6 +1150,13 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
         outputs=[image_to_text_page, home_page]
     )
 
+    # Back button action from Chat with Files page
+    chat_back_button.click(
+        fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
+        inputs=[],
+        outputs=[chat_with_files_page, home_page]
+    )
+
     # PDF Upload action
     pdf_upload_input.upload(
         fn=handle_pdf_upload,
@@ -819,17 +1191,57 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
         outputs=[image_text_output]
     )
 
+    # Chat with Files actions
+    chat_pdf_upload.upload(
+        fn=handle_chat_pdf_upload,
+        inputs=[chat_pdf_upload],
+        outputs=[chat_status, chat_interface, chat_input, chat_interface]
+    )
+
+    chat_send_button.click(
+        fn=handle_chat_message,
+        inputs=[chat_input, chat_interface, session_state],
+        outputs=[chat_interface, chat_input]
+    )
+
+    chat_input.submit(
+        fn=handle_chat_message,
+        inputs=[chat_input, chat_interface, session_state],
+        outputs=[chat_interface, chat_input]
+    )
+
+    chat_clear_button.click(
+        fn=clear_chat,
+        inputs=[],
+        outputs=[chat_interface, chat_status, chat_input]
+    )
+
 
 # --- App Launch ---
 if __name__ == "__main__":
     try:
-        demo.launch(server_name="0.0.0.0", 
-                    share=False, 
-                    debug=True,
-                    ssl_certfile="certificates/server.crt",
-                    ssl_keyfile="certificates/server.key",
-                    ssl_verify=False  # Disable SSL verification for self-signed certs
-                    )
+        # Check for development environment flag
+        is_development = os.environ.get("DEVELOPMENT_ENV", "").lower() in ["true", "1", "yes", "on"]
+        
+        if is_development:
+            # Development environment with HTTPS
+            logging.info("Starting in development mode with HTTPS")
+            demo.launch(
+                server_name="0.0.0.0", 
+                share=False, 
+                debug=True,
+                ssl_certfile="certificates/server.crt",
+                ssl_keyfile="certificates/server.key",
+                ssl_verify=False  # Disable SSL verification for self-signed certs
+            )
+        else:
+            # Production environment with HTTP
+            logging.info("Starting in production mode with HTTP")
+            demo.launch(
+                server_name="0.0.0.0", 
+                share=False, 
+                debug=True
+            )
     finally:
         # Clean up database connections when app shuts down
         user_manager.close()
