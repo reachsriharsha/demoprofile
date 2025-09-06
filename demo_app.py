@@ -101,8 +101,8 @@ class RAGSystem:
             
             # Create QA chain
             llm = ChatOpenAI(
-                model="gpt-3.5-turbo",
-                temperature=0.2,
+                model="gpt-5-nano",
+                temperature=1,
                 openai_api_key=os.environ.get("OPENAI_API_KEY")
             )
             
@@ -149,6 +149,50 @@ class RAGSystem:
         except Exception as e:
             logging.error(f"Error querying RAG system: {e}")
             return f"Error processing your question: {str(e)}"
+    
+    def query_stream(self, question):
+        """Query the RAG system with streaming response"""
+        if not self.qa_chain:
+            yield "No document loaded. Please upload a PDF file first."
+            return
+        
+        try:
+            # Get relevant documents
+            docs = self.vectorstore.similarity_search(question, k=3)
+            context = "\n".join([doc.page_content for doc in docs])
+            
+            # Create streaming LLM
+            streaming_llm = ChatOpenAI(
+                model="gpt-5-nano",
+                temperature=1,
+                openai_api_key=os.environ.get("OPENAI_API_KEY"),
+                streaming=True
+            )
+            
+            # Create prompt
+            prompt_template = """
+            You are a helpful AI assistant that answers questions based on the provided document context. 
+            Use the following pieces of context to answer the question at the end. 
+            If you don't know the answer based on the context, just say that you don't know, don't try to make up an answer.
+            
+            Context:
+            {context}
+            
+            Question: {question}
+            
+            Answer: """
+            
+            # Format the prompt
+            formatted_prompt = prompt_template.format(context=context, question=question)
+            
+            # Stream the response
+            for chunk in streaming_llm.stream(formatted_prompt):
+                if chunk.content:
+                    yield chunk.content
+                    
+        except Exception as e:
+            logging.error(f"Error in streaming query: {e}")
+            yield f"Error processing your question: {str(e)}"
     
     def clear(self):
         """Clear the current vector store"""
@@ -456,7 +500,7 @@ def convert_text_to_speech(text, speaker, session_state, progress=gr.Progress(tr
         quota_check = user_manager.check_text_to_voice_quota(user_email)
         if not quota_check['can_use']:
             gr.Warning(quota_check['message'])
-            return gr.update(value="Speech synthesis quota exceeded. Please check logs for details.", visible=True)
+            return gr.update(value="Speech synthesis quota exceeded. Please try after 24 hours.", visible=True)
 
     # Voice mapping from generic names to actual speaker names
     voice_mapping = {
@@ -667,29 +711,51 @@ def handle_chat_pdf_upload(pdf_file, progress=gr.Progress(track_tqdm=True)):
             gr.update(value=[])
         )
 
-def handle_chat_message(message, chat_history):
-    """Handle chat messages and return responses from RAG system."""
+def handle_chat_message(message, chat_history, session_state):
+    """Handle chat messages and return responses from RAG system with streaming."""
     if not message.strip():
-        return chat_history, ""
+        yield chat_history, ""
+        return
     
     if not rag_system.qa_chain:
         chat_history.append([message, "Please upload a PDF file first before asking questions."])
-        return chat_history, ""
+        yield chat_history, ""
+        return
+    
+    # Check user quota before proceeding
+    user_email = session_state.get("user_email", "") if session_state else ""
+    if user_email:
+        quota_check = user_manager.check_pdf_chat_quota(user_email)
+        if not quota_check['can_use']:
+            # Show popup warning
+            gr.Warning(quota_check['message'])
+            # Also add to chat history for context
+            chat_history.append([message, f"❌ {quota_check['message']}"])
+            yield chat_history, ""
+            return
     
     try:
-        # Get response from RAG system
-        response = rag_system.query(message)
+        # Add user message to chat history with empty assistant response
+        chat_history.append([message, ""])
         
-        # Add to chat history
-        chat_history.append([message, response])
+        # Get streaming response from RAG system
+        partial_response = ""
+        for chunk in rag_system.query_stream(message):
+            partial_response += chunk
+            # Update the last message in chat history with partial response
+            chat_history[-1][1] = partial_response
+            yield chat_history, ""
         
-        return chat_history, ""
+        # Increment usage count after successful response
+        if user_email:
+            user_manager.increment_pdf_chat_usage(user_email)
+            logging.info(f"Incremented PDF chat usage for {user_email}")
         
     except Exception as e:
         logging.error(f"Error in chat: {e}")
         error_response = "Sorry, I encountered an error while processing your question. Please try again."
-        chat_history.append([message, error_response])
-        return chat_history, ""
+        chat_history[-1][1] = error_response
+        yield chat_history, ""
 
 def clear_chat():
     """Clear the chat history and reset the RAG system."""
@@ -1134,13 +1200,13 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
 
     chat_send_button.click(
         fn=handle_chat_message,
-        inputs=[chat_input, chat_interface],
+        inputs=[chat_input, chat_interface, session_state],
         outputs=[chat_interface, chat_input]
     )
 
     chat_input.submit(
         fn=handle_chat_message,
-        inputs=[chat_input, chat_interface],
+        inputs=[chat_input, chat_interface, session_state],
         outputs=[chat_interface, chat_input]
     )
 
@@ -1154,13 +1220,28 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
 # --- App Launch ---
 if __name__ == "__main__":
     try:
-        demo.launch(server_name="0.0.0.0", 
-                    share=False, 
-                    debug=True,
-                    #ssl_certfile="certificates/server.crt",
-                    #ssl_keyfile="certificates/server.key",
-                    #ssl_verify=False  # Disable SSL verification for self-signed certs
-                    )
+        # Check for development environment flag
+        is_development = os.environ.get("DEVELOPMENT_ENV", "").lower() in ["true", "1", "yes", "on"]
+        
+        if is_development:
+            # Development environment with HTTPS
+            logging.info("Starting in development mode with HTTPS")
+            demo.launch(
+                server_name="0.0.0.0", 
+                share=False, 
+                debug=True,
+                ssl_certfile="certificates/server.crt",
+                ssl_keyfile="certificates/server.key",
+                ssl_verify=False  # Disable SSL verification for self-signed certs
+            )
+        else:
+            # Production environment with HTTP
+            logging.info("Starting in production mode with HTTP")
+            demo.launch(
+                server_name="0.0.0.0", 
+                share=False, 
+                debug=True
+            )
     finally:
         # Clean up database connections when app shuts down
         user_manager.close()

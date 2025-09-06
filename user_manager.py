@@ -22,9 +22,10 @@ class UserLogin(Base):
     last_login_time = Column(DateTime, nullable=False)
     voice_to_text_usage_count = Column(Integer, default=0, nullable=False)
     text_to_voice_usage_count = Column(Integer, default=0, nullable=False)
+    pdf_chat_usage_count = Column(Integer, default=0, nullable=False)
     
     def __repr__(self):
-        return f"<UserLogin(email='{self.email}', last_login_time='{self.last_login_time}', voice_to_text_usage_count={self.voice_to_text_usage_count}, text_to_voice_usage_count={self.text_to_voice_usage_count})>"
+        return f"<UserLogin(email='{self.email}', last_login_time='{self.last_login_time}', voice_to_text_usage_count={self.voice_to_text_usage_count}, text_to_voice_usage_count={self.text_to_voice_usage_count}, pdf_chat_usage_count={self.pdf_chat_usage_count})>"
 
 class UserManager:
     """
@@ -59,6 +60,9 @@ class UserManager:
             # Create tables
             Base.metadata.create_all(bind=self.engine)
             
+            # Run database migrations
+            self._run_migrations()
+            
             logging.info(f"Database initialized successfully at {self.db_path}")
             
         except SQLAlchemyError as e:
@@ -68,6 +72,27 @@ class UserManager:
     def _get_session(self) -> Session:
         """Get a new database session."""
         return self.SessionLocal()
+    
+    def _run_migrations(self):
+        """Run database migrations to add new columns if they don't exist."""
+        try:
+            with self._get_session() as session:
+                # Check if pdf_chat_usage_count column exists
+                result = session.execute(text("PRAGMA table_info(user_logins)"))
+                columns = [row[1] for row in result.fetchall()]
+                
+                if 'pdf_chat_usage_count' not in columns:
+                    logging.info("Adding pdf_chat_usage_count column to user_logins table")
+                    session.execute(text("ALTER TABLE user_logins ADD COLUMN pdf_chat_usage_count INTEGER DEFAULT 0 NOT NULL"))
+                    session.commit()
+                    logging.info("Successfully added pdf_chat_usage_count column")
+                
+        except SQLAlchemyError as e:
+            logging.error(f"Failed to run migrations: {e}")
+            # Don't raise here, as the database might still be usable
+        except Exception as e:
+            logging.error(f"Unexpected error during migrations: {e}")
+            # Don't raise here, as the database might still be usable
     
     def record_login(self, email: str) -> bool:
         """
@@ -100,7 +125,8 @@ class UserManager:
                         email=email.strip().lower(),
                         last_login_time=current_time,
                         voice_to_text_usage_count=0,
-                        text_to_voice_usage_count=0
+                        text_to_voice_usage_count=0,
+                        pdf_chat_usage_count=0
                     )
                     session.add(new_user)
                     logging.info(f"Created new user record: {email}")
@@ -138,7 +164,8 @@ class UserManager:
                         "last_login_time": user.last_login_time,
                         "last_login_formatted": user.last_login_time.strftime("%Y-%m-%d %H:%M:%S"),
                         "voice_to_text_usage_count": user.voice_to_text_usage_count,
-                        "text_to_voice_usage_count": user.text_to_voice_usage_count
+                        "text_to_voice_usage_count": user.text_to_voice_usage_count,
+                        "pdf_chat_usage_count": user.pdf_chat_usage_count
                     }
                 return None
                 
@@ -165,7 +192,8 @@ class UserManager:
                         "last_login_time": user.last_login_time,
                         "last_login_formatted": user.last_login_time.strftime("%Y-%m-%d %H:%M:%S"),
                         "voice_to_text_usage_count": user.voice_to_text_usage_count,
-                        "text_to_voice_usage_count": user.text_to_voice_usage_count
+                        "text_to_voice_usage_count": user.text_to_voice_usage_count,
+                        "pdf_chat_usage_count": user.pdf_chat_usage_count
                     }
                     for user in users
                 ]
@@ -293,6 +321,39 @@ class UserManager:
             return False
         except Exception as e:
             logging.error(f"Unexpected error incrementing text-to-voice usage for {email}: {e}")
+            return False
+    
+    def increment_pdf_chat_usage(self, email: str) -> bool:
+        """
+        Increment PDF chat usage count for a user.
+        
+        Args:
+            email (str): User's email address
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        if not email or not email.strip():
+            return False
+        
+        try:
+            with self._get_session() as session:
+                user = session.query(UserLogin).filter(UserLogin.email == email.strip().lower()).first()
+                
+                if user:
+                    user.pdf_chat_usage_count += 1
+                    session.commit()
+                    logging.info(f"Incremented PDF chat usage for {email}. New count: {user.pdf_chat_usage_count}")
+                    return True
+                else:
+                    logging.warning(f"User not found for PDF chat usage increment: {email}")
+                    return False
+                    
+        except SQLAlchemyError as e:
+            logging.error(f"Failed to increment PDF chat usage for {email}: {e}")
+            return False
+        except Exception as e:
+            logging.error(f"Unexpected error incrementing PDF chat usage for {email}: {e}")
             return False
     
     def check_voice_to_text_quota(self, email: str, max_daily_usage: int = 5) -> dict:
@@ -448,6 +509,86 @@ class UserManager:
             }
         except Exception as e:
             logging.error(f"Unexpected error checking text-to-voice quota for {email}: {e}")
+            return {
+                'can_use': False,
+                'current_usage': 0,
+                'max_usage': max_daily_usage,
+                'message': 'Unexpected error occurred'
+            }
+    
+    def check_pdf_chat_quota(self, email: str, max_daily_usage: int = 5) -> dict:
+        """
+        Check if user has reached their daily PDF chat quota.
+        Resets usage count if more than 24 hours have passed since last login.
+        
+        Args:
+            email (str): User's email address
+            max_daily_usage (int): Maximum allowed daily usage (default: 5)
+            
+        Returns:
+            dict: {
+                'can_use': bool,
+                'current_usage': int,
+                'max_usage': int,
+                'message': str
+            }
+        """
+        if not email or not email.strip():
+            return {
+                'can_use': False,
+                'current_usage': 0,
+                'max_usage': max_daily_usage,
+                'message': 'Invalid email provided'
+            }
+        
+        try:
+            with self._get_session() as session:
+                user = session.query(UserLogin).filter(UserLogin.email == email.strip().lower()).first()
+                
+                if not user:
+                    return {
+                        'can_use': False,
+                        'current_usage': 0,
+                        'max_usage': max_daily_usage,
+                        'message': 'User not found'
+                    }
+                
+                current_time = datetime.now()
+                time_diff = current_time - user.last_login_time
+                hours_since_login = time_diff.total_seconds() / 3600
+                
+                # If more than 24 hours have passed since last login, reset usage count
+                if hours_since_login > 24:
+                    user.pdf_chat_usage_count = 0
+                    session.commit()
+                    logging.info(f"Reset PDF chat usage count for {email} (last login > 24h ago)")
+                
+                # Check if user has reached quota
+                if user.pdf_chat_usage_count >= max_daily_usage:
+                    return {
+                        'can_use': False,
+                        'current_usage': user.pdf_chat_usage_count,
+                        'max_usage': max_daily_usage,
+                        'message': f'Your quota of {max_daily_usage} PDF chat questions reached. Try after 24 hours.'
+                    }
+                else:
+                    return {
+                        'can_use': True,
+                        'current_usage': user.pdf_chat_usage_count,
+                        'max_usage': max_daily_usage,
+                        'message': f'PDF Chat Usage: {user.pdf_chat_usage_count}/{max_daily_usage}'
+                    }
+                    
+        except SQLAlchemyError as e:
+            logging.error(f"Failed to check PDF chat quota for {email}: {e}")
+            return {
+                'can_use': False,
+                'current_usage': 0,
+                'max_usage': max_daily_usage,
+                'message': 'Database error occurred'
+            }
+        except Exception as e:
+            logging.error(f"Unexpected error checking PDF chat quota for {email}: {e}")
             return {
                 'can_use': False,
                 'current_usage': 0,
