@@ -1,22 +1,22 @@
-# Git
-.git
+# Docker-related files
+Dockerfile
+.dockerignore
+
+# Git files
+.git/
 .gitignore
 
-# Docker
-.dockerignore
-Dockerfile*
-docker-compose.yml
-
-# Python
+# Python virtual environment and cache
+.venv/
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-.env
-venv/
-*.egg-info/
 
-# Application data (should be mounted as volumes if persistence is needed)
+# Logs and generated files from the app
+*.log
 uploads/
 audios/
-gradio_app.log
+
+# IDE and OS-specific files
+.idea/
+.vscode/
+*.DS_Store

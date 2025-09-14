@@ -13,7 +13,4 @@ services:
       - ./gradio_app.log:/app/gradio_app.log
     env_file:
       - .env
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf
-      - /etc/letsencrypt:/etc/letsencrypt:ro
     restart: unless-stopped

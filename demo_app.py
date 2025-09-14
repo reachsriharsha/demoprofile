@@ -1,6 +1,10 @@
 import gradio as gr
 import os
 import shutil
+import time
+import subprocess
+import os
+import requests
 import uuid
 import camelot
 import re
@@ -30,6 +34,24 @@ import openai
 import numpy as np
 from typing import List
 
+# AI Receptionist imports
+from livekit import agents
+from livekit.plugins import openai, sarvam , silero
+from livekit.plugins.turn_detector.multilingual import MultilingualModel
+from livekit.agents import (
+    NOT_GIVEN,
+    Agent,
+    AgentSession ,
+    JobContext,
+    cli,
+    JobProcess,
+    RoomInputOptions,
+    WorkerOptions,
+    RunContext,
+    AgentFalseInterruptionEvent
+)
+
+
 # Load environment variables from a .env file
 load_dotenv()
 
@@ -41,6 +63,10 @@ logging.basicConfig(
         logging.StreamHandler()  # Also log to console
     ]
 )
+
+# Global process trackers
+agent_process = None
+playground_process = None
 
 # --- State Management ---
 # Session-based state management using Gradio State components
@@ -200,8 +226,11 @@ class RAGSystem:
         self.qa_chain = None
         self.current_file_id = None
 
+# --- AI Receptionist App ---
+
 # Initialize RAG system
 rag_system = RAGSystem()
+
 
 # --- Event Handlers ---
 
@@ -762,6 +791,114 @@ def clear_chat():
     rag_system.clear()
     return [], gr.update(value="Chat cleared. Upload a new PDF to start over.", visible=True), gr.update(interactive=False)
 
+
+def start_receptionist_services():
+    """Start agent and playground when user enters the page"""
+    global agent_process, playground_process
+    
+    try:
+        # Stop any existing processes first
+        stop_receptionist_services()
+        loading_html = """
+            <div style="background: #e3f2fd; padding: 10px; border-radius: 8px; margin: 10px 0;">
+                <p style="margin: 0; color: #1565c0;">
+                    ⏳ <strong>Starting Services...</strong> This will take a few seconds
+                </p>
+            </div>
+        """        
+
+        # Start the agent
+        agent_process = subprocess.Popen([
+            "python", "receptionist_agent.py",
+            "start"
+        ])
+        
+        # Start the playground
+        playground_process = subprocess.Popen([
+            "npm", "run", "dev"
+        ], cwd="agents-playground")
+        
+        # Wait a moment for services to start
+        time.sleep(3)
+        
+        playground_ready = False
+        # Check if playground is ready
+        for i in range(10):  # Try for 10 seconds
+            try:
+                response = requests.get("http://localhost:3000", timeout=1)
+                if response.status_code == 200:
+                    playground_ready = True
+                    break
+            except:
+                time.sleep(1)
+
+        if playground_ready:
+            status_html = """
+                <div style="background: #e8f5e8; padding: 10px; border-radius: 8px; margin: 10px 0;">
+                    <p style="margin: 0; color: #2d5a2d;">
+                        🟢 <strong>Services Started:</strong> Agent and Playground are running
+                    </p>
+                    <p style="margin: 5px 0 0 0; font-size: 0.9em; color: #666;">
+                        You can now start speaking to the AI receptionist
+                    </p>
+                </div>
+            """
+            
+            iframe_html = """
+                <iframe 
+                    src="http://localhost:3000" 
+                    width="100%" 
+                    height="700px" 
+                    frameborder="0"
+                    allow="camera;microphone;autoplay;display-capture"
+                    style="border-radius: 8px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                </iframe>
+            """
+        else:
+            status_html = loading_html  # Keep loading state
+            iframe_html = ""
+
+        return status_html, iframe_html, gr.update(visible=False), gr.update(visible=True)
+        
+    except Exception as e:
+        error_html = f"""
+            <div style="background: #fee; padding: 10px; border-radius: 8px; margin: 10px 0;">
+                <p style="margin: 0; color: #d32f2f;">
+                    ❌ <strong>Failed to start services:</strong> {str(e)}
+                </p>
+            </div>
+        """
+        return error_html, "", gr.update(visible=True), gr.update(visible=False)
+
+def stop_receptionist_services():
+    """Stop agent and playground when user exits"""
+    global agent_process, playground_process
+    
+    if agent_process:
+        agent_process.terminate()
+        agent_process = None
+    
+    if playground_process:
+        playground_process.terminate()
+        # Also kill any node processes that might be lingering
+        try:
+            os.system("pkill -f 'npm run dev'")
+            os.system("pkill -f 'next-server'")
+        except:
+            pass
+        playground_process = None
+    
+    status_html = """
+        <div style="background: #fff3cd; padding: 10px; border-radius: 8px; margin: 10px 0;">
+            <p style="margin: 0; color: #856404;">
+                🔴 <strong>Services Stopped:</strong> Agent and Playground have been terminated
+            </p>
+        </div>
+    """
+    
+    return status_html, "", gr.update(visible=True), gr.update(visible=False)
+
+
 # --- UI Definition ---
 
 # Custom CSS for a modern and clean look
@@ -1057,6 +1194,36 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
                     )
                     chat_send_button = gr.Button("Send", variant="primary", scale=1) 
 
+    # --- AI Voice Receptionist Page ---
+    with gr.Column(visible=False) as ai_voice_receptionist_page:
+        with gr.Row():
+            with gr.Column(elem_classes=["page-container"]):
+                ai_voice_receptionist_back_button = gr.Button("← Back to Home", elem_classes=["back-button"])
+                app_title = gr.HTML('<h2 class="page-title">🤖 AI Voice Receptionist</h2>')
+                
+                # Status indicator
+                with gr.Row():
+                    status_indicator = gr.HTML("""
+                        <div style="background: #e8f5e8; padding: 10px; border-radius: 8px; margin: 10px 0;">
+                            <p style="margin: 0; color: #2d5a2d;">
+                                🟢 <strong>Agent Status:</strong> Ready to connect
+                            </p>
+                            <p style="margin: 5px 0 0 0; font-size: 0.9em; color: #666;">
+                                Start speaking to begin your conversation with the AI receptionist
+                            </p>
+                        </div>
+                    """)
+                playground_iframe = gr.HTML("""
+                    <iframe 
+                        src="http://localhost:3000" 
+                        width="100%" 
+                        height="700px" 
+                        frameborder="0"
+                        allow="camera;microphone;autoplay;display-capture"
+                        style="border-radius: 8px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                    </iframe>
+                """)
+
     # --- Event Wiring ---
 
     # Login action
@@ -1107,6 +1274,13 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
                 fn=lambda: (gr.update(visible=False), gr.update(visible=True)),
                 inputs=[],
                 outputs=[home_page, chat_with_files_page]
+            )
+        elif name == "AI Voice Receptionist":
+            # Special navigation for AI Voice Receptionist page
+            button.click(
+                fn=start_receptionist_services,
+                inputs=[],
+                outputs=[status_indicator, playground_iframe, home_page, ai_voice_receptionist_page]
             )
         else:
             # Generic navigation for other apps
@@ -1216,6 +1390,11 @@ with gr.Blocks(css=css, title="AI Projects Portfolio") as demo:
         outputs=[chat_interface, chat_status, chat_input]
     )
 
+    ai_voice_receptionist_back_button.click(
+        fn=stop_receptionist_services,
+        inputs=[],
+        outputs=[status_indicator, playground_iframe, home_page, ai_voice_receptionist_page]
+    )    
 
 # --- App Launch ---
 if __name__ == "__main__":
@@ -1240,7 +1419,10 @@ if __name__ == "__main__":
             demo.launch(
                 server_name="0.0.0.0", 
                 share=False, 
-                debug=True
+                debug=True,
+                ssl_certfile="certificates/server.crt",
+                ssl_keyfile="certificates/server.key",
+                ssl_verify=False 
             )
     finally:
         # Clean up database connections when app shuts down
