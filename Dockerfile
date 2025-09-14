@@ -38,6 +38,8 @@ COPY agents-playground/ agents-playground/
 # termination or mounting certificates as secrets, rather than building them in.
 COPY certificates/ ./certificates/
 
+RUN python receptionist_agent.py download-files
+
 # Make port 7860 available to the world outside this container for the Gradio app
 EXPOSE 7860 3000
 
